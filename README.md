@@ -16,8 +16,8 @@ All calls take and return JSON. Bad input gets a 4xx, never a 5xx.
 curl -X POST "$BASE/v1/verify-place" -d '{"url":"https://forge.placeschema.com"}'
 ```
 
-The checks are the published [`@placeschema/protocol`](https://www.npmjs.com/package/@placeschema/protocol)
-verifiers (`verifyGrantEvent`, `validateCapabilities`, `parsePlaceTemplate`). Nothing is re-implemented here.
+The checks are the `@placeschema/protocol` 0.1.0 verifiers. The npm package is coming; until it is
+live, the exact 0.1.0 tarball is vendored in `vendor/`. The verifiers used are `verifyGrantEvent`, `validateCapabilities` and `parsePlaceTemplate`. Nothing is re-implemented here.
 
 ```sh
 npm install && npm test   # node 24
