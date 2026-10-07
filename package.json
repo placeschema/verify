@@ -1,0 +1,17 @@
+{
+  "name": "placeschema-verify",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node --test --experimental-strip-types test/worker.test.ts"
+  },
+  "dependencies": {
+    "@placeschema/protocol": "file:vendor/placeschema-protocol-0.1.0.tgz"
+  },
+  "devDependencies": {
+    "nostr-tools": "^2.25.2",
+    "wrangler": "^4.0.0"
+  }
+}
