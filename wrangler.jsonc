@@ -2,5 +2,7 @@
   "name": "placeschema-verify",
   "main": "src/worker.ts",
   "compatibility_date": "2026-10-01",
-  "workers_dev": true
+  "workers_dev": true,
+  // v1 is free; POKT's portal bills. Payee for a later paid path (Seth, 2026-10-07): set once, here.
+  "vars": { "PAYEE": "" }
 }
