@@ -22,6 +22,7 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 export function verifyGrantRequest(body: any) {
   if (!body?.grant || typeof body.grant !== "object") return { status: 400, body: { error: "grant (a signed kind-30080 event) is required" } };
   const v = verifyGrantEvent(body.grant);
+  if (body.holder !== undefined && typeof body.holder !== "string") return { status: 400, body: { error: "holder must be a 64-hex pubkey string" } };
   if (!v.ok) return { status: 200, body: { valid: false, reason: v.reason } };
   if (typeof body.holder === "string" && body.holder !== v.holder) {
     return { status: 200, body: { valid: false, reason: "grant is held by a different key", holder: v.holder } };
@@ -55,7 +56,10 @@ export async function verifyPlaceRequest(body: any) {
   let accepts: unknown;
   let place: string | undefined;
   try {
-    const manifest = await fetchText(`${origin}/.well-known/placeschema.json`);
+    const [manifest, md] = await Promise.all([
+      fetchText(`${origin}/.well-known/placeschema.json`),
+      fetchText(`${origin}/.well-known/place.md`),
+    ]);
     if (manifest === null) problems.push("placeschema.json: not served");
     else {
       try {
@@ -66,7 +70,6 @@ export async function verifyPlaceRequest(body: any) {
         problems.push(`placeschema.json: ${message(e)}`);
       }
     }
-    const md = await fetchText(`${origin}/.well-known/place.md`);
     if (md !== null) {
       try {
         parsePlaceTemplate(md);
