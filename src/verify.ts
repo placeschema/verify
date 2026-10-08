@@ -8,6 +8,8 @@ export const KNOWN_ORIGINS = new Set([
   "https://shop.placeschema.com",
   "https://forge.placeschema.com",
   "https://voxel.placeschema.com",
+  "https://liminal.placeschema.com",
+  "https://zombie.placeschema.com",
 ]);
 
 const MAX_BODY = 64 * 1024; // bytes
