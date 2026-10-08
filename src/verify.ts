@@ -126,7 +126,10 @@ let warned = false;
 
 /** Fail open: a broken or missing limiter must never turn into a 5xx or a block. */
 async function limited(req: Request, env: Env): Promise<boolean> {
-  if (!env.LIMITER) return false;
+  if (!env.LIMITER) {
+    if (!warned) (warned = true, console.error("LIMITER binding missing; rate limiting is off"));
+    return false;
+  }
   try {
     return !(await env.LIMITER.limit({ key: req.headers.get("cf-connecting-ip") ?? "unknown" })).success;
   } catch (e) {
