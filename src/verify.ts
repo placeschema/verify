@@ -1,4 +1,5 @@
 import { parsePlaceTemplate, validateCapabilities, verifyGrantEvent } from "@placeschema/protocol";
+import { verifyEvent } from "nostr-tools/pure";
 
 export const VERSION = "0.1.0";
 
@@ -119,7 +120,100 @@ export async function verifyPlaceRequest(body: any) {
   return { status: 200, body: { valid: problems.length === 0, live: true, origin, place, placeMd, accepts, problems } };
 }
 
-export type Env = { LIMITER?: { limit(o: { key: string }): Promise<{ success: boolean }> }; BUILD_COMMIT?: string };
+export type Env = { LIMITER?: { limit(o: { key: string }): Promise<{ success: boolean }> }; BUILD_COMMIT?: string; STASH_RELAY?: string };
+
+const STASH_KIND = 30083;
+const STASH_TIMEOUT_MS = 7_000;
+const STASH_NOTE = "self-reported by the holder; grant not verified";
+type Receipt = { id: string; kind: number; pubkey: string; created_at: number; tags: string[][]; content: string; sig: string };
+
+function receiptTag(ev: Receipt, name: string): string | undefined {
+  return ev.tags.find((tag) => tag[0] === name && typeof tag[1] === "string")?.[1];
+}
+
+/** A relay response is untrusted; only signed receipts from the requested holder can enter the result. */
+async function readStashReceipts(holder: string, relay: string): Promise<Receipt[]> {
+  const url = new URL(relay);
+  if (url.protocol !== "wss:" && url.protocol !== "ws:") throw new Error("invalid relay URL");
+  url.protocol = url.protocol === "wss:" ? "https:" : "http:";
+  const controller = new AbortController();
+  let socket: WebSocket | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      new Promise<Receipt[]>(async (resolve, reject) => {
+        try {
+          const response = await fetch(url.toString(), { headers: { Upgrade: "websocket" }, signal: controller.signal });
+          socket = (response as Response & { webSocket?: WebSocket }).webSocket;
+          if (!socket) throw new Error("relay did not accept WebSocket");
+          socket.accept();
+          const receipts: Receipt[] = [];
+          let settled = false;
+          const finish = (error?: Error) => {
+            if (settled) return;
+            settled = true;
+            if (error) reject(error);
+            else resolve(receipts);
+          };
+          socket.addEventListener("message", (event) => {
+            try {
+              const frame = JSON.parse(String(event.data));
+              if (frame[0] === "EOSE") return finish();
+              if (frame[0] !== "EVENT" || frame[1] !== "stash") return;
+              const ev = frame[2] as Receipt;
+              if (receipts.length < 256 && ev?.kind === STASH_KIND && ev.pubkey === holder && verifyEvent(ev)) receipts.push(ev);
+              if (receipts.length === 256) finish();
+            } catch { /* Ignore malformed relay frames. */ }
+          });
+          socket.addEventListener("error", () => finish(new Error("relay WebSocket error")));
+          socket.addEventListener("close", () => finish(new Error("relay closed before EOSE")));
+          socket.send(JSON.stringify(["REQ", "stash", { kinds: [STASH_KIND], authors: [holder], limit: 256 }]));
+        } catch (e) { reject(e); }
+      }),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(new Error("relay timed out")); }, STASH_TIMEOUT_MS); }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    controller.abort();
+    try { socket?.close(); } catch {}
+  }
+}
+
+/** List a holder's signed, self-reported receipts; supplied grants add offline provenance. */
+export async function stashRequest(body: any, env: Env = {}) {
+  if (typeof body?.holder !== "string" || !HEX64.test(body.holder.toLowerCase())) {
+    return { status: 400, body: { error: "holder must be a 64-hex pubkey string" } };
+  }
+  const holder = body.holder.toLowerCase();
+  const problems: string[] = [];
+  const grants = new Map<string, { minter: string; author: string; license: string }>();
+  if (body.grants !== undefined && !Array.isArray(body.grants)) return { status: 400, body: { error: "grants must be an array" } };
+  for (const supplied of body.grants ?? []) {
+    const verdict = verifyGrantEvent(supplied);
+    if (!verdict.ok) { problems.push(`invalid grant: ${verdict.reason}`); continue; }
+    if (verdict.holder !== holder) { problems.push(`grant ${verdict.id} is held by a different key`); continue; }
+    const source = verdict.template.sources?.[0];
+    grants.set(verdict.id, { minter: verdict.minter, author: source?.author ?? "", license: source?.license ?? "" });
+  }
+  let receipts: Receipt[];
+  try { receipts = await readStashReceipts(holder, env.STASH_RELAY ?? "wss://nostr.placeschema.com"); }
+  catch (e) { return { status: 200, body: { holder, items: [], count: 0, problems: [...problems, `relay unavailable: ${message(e)}`] } }; }
+  const newest = new Map<string, Receipt>();
+  for (const ev of receipts) {
+    const grant = receiptTag(ev, "d");
+    const status = receiptTag(ev, "status");
+    if (!grant || (status !== "redeemed" && status !== "deposited")) continue;
+    const previous = newest.get(grant);
+    if (!previous || ev.created_at > previous.created_at || (ev.created_at === previous.created_at && ev.id > previous.id)) newest.set(grant, ev);
+  }
+  const items = [...newest.entries()].sort((a, b) => b[1].created_at - a[1].created_at || b[1].id.localeCompare(a[1].id)).slice(0, 100).map(([grant, ev]) => {
+    const checked = grants.get(grant);
+    return checked
+      ? { grant, status: receiptTag(ev, "status"), verified: true, ...checked }
+      : { grant, status: receiptTag(ev, "status"), verified: false, note: STASH_NOTE };
+  });
+  return { status: 200, body: { holder, items, count: items.length, problems } };
+}
 
 const CACHE_SECONDS = 300;
 let warned = false;
@@ -167,7 +261,7 @@ export async function handle(req: Request, env: Env = {}): Promise<Response> {
     if (req.method === "POST" && pathname.startsWith("/v1/") && (await limited(req, env))) {
       return new Response(JSON.stringify({ error: "rate limited" }), { status: 429, headers: { "content-type": "application/json", "retry-after": "60" } });
     }
-    const route = { "/v1/verify-grant": verifyGrantRequest, "/v1/verify-place": cachedPlace }[pathname];
+    const route = { "/v1/verify-grant": verifyGrantRequest, "/v1/verify-place": cachedPlace, "/v1/stash": (body: any) => stashRequest(body, env) }[pathname];
     if (!route) return bad("not found", 404);
     if (req.method !== "POST") return bad("use POST with a JSON body", 405);
     const declared = Number(req.headers.get("content-length"));
