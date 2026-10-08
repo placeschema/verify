@@ -17,6 +17,20 @@ Successful `verify-place` results are cached for 300 s per origin. If the limite
 | `POST /v1/verify-grant` `{ grant, holder? }` | Is this signed item grant (a kind-30080 Nostr event) authentic? It returns the holder, the minter, the item and its licensed sources. The check is offline. |
 | `POST /v1/verify-place` `{ url }` | Is this a live place with a valid `/.well-known/placeschema.json` (and a valid `place.md` when one is served), and what items does it accept? v1 checks known PlaceSchema origins only. |
 
+## Try it
+
+Base URL: `https://placeschema-verify.lively-voice-30ac.workers.dev`
+
+```sh
+BASE=https://placeschema-verify.lively-voice-30ac.workers.dev
+curl $BASE/v1/version     # {"name":"placeschema-verify","version":"0.1.0","commit":"…"}
+curl -X POST $BASE/v1/verify-place -d '{"url":"https://forge.placeschema.com"}'
+curl -X POST $BASE/v1/verify-grant -d @test/sample-grant.json   # valid: true
+```
+
+`verify-grant` returns `{ valid, holder, minter, item, type, label, sources: [{ author, license }] }`
+or `{ valid: false, reason }`. `test/sample-grant.json` is signed with a throwaway key.
+
 **What `verify-grant` attests.** `valid: true` means the grant is an authentic issuance by `minter`:
 well-formed, signed by the template's own minter key, and naming `holder` as the key it was minted to.
 It does not say the holder still has the item, and it does not say `minter` is a trustworthy world:
