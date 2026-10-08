@@ -6,6 +6,11 @@ this they can check who owns a portable item, who made it, and under what licenc
 
 All calls take and return JSON. Bad input gets a 4xx, never a 5xx.
 
+**Limits.** `POST /v1/*` is limited to 60 requests per 60 s per client IP (`CF-Connecting-IP`); over that you get
+`429 {"error":"rate limited"}` with `retry-after: 60`. `GET /v1/version` and `/v1/health` are never limited.
+Successful `verify-place` results are cached for 300 s per origin. If the limiter is missing or errors, requests are served normally (fail open).
+`GET /v1/version` also returns `commit` (the `BUILD_COMMIT` var set at deploy; empty if unset) so a deploy can be checked.
+
 | Call | What it answers |
 |---|---|
 | `GET /v1/version`, `GET /v1/health` | Liveness. |
