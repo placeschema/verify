@@ -10,21 +10,50 @@ export const KNOWN_ORIGINS = new Set([
   "https://voxel.placeschema.com",
 ]);
 
-const MAX_BODY = 64 * 1024;
+const MAX_BODY = 64 * 1024; // bytes
+const MAX_FETCHED = 256 * 1024; // bytes
+// ponytail: place.md heading regex in the protocol parser is quadratic (PLACE-769); 32 KB bounds it until it is fixed upstream.
+const MAX_PLACE_MD = 32 * 1024;
 const FETCH_TIMEOUT_MS = 10_000;
+const HEX64 = /^[0-9a-f]{64}$/;
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 const bad = (error: string, status = 400) => json({ error }, status);
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
+/** Read a body as text, stopping as soon as it passes `max` bytes. `null` = too large. */
+async function readCapped(body: ReadableStream<Uint8Array> | null, max: number): Promise<string | null> {
+  if (!body) return "";
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const all = new Uint8Array(size);
+  let at = 0;
+  for (const c of chunks) (all.set(c, at), (at += c.byteLength));
+  return new TextDecoder().decode(all);
+}
+
 /** Is `grant` (a signed 30080 Nostr event) genuine, and who holds it? Offline, deterministic. */
 export function verifyGrantRequest(body: any) {
   if (!body?.grant || typeof body.grant !== "object") return { status: 400, body: { error: "grant (a signed kind-30080 event) is required" } };
   const v = verifyGrantEvent(body.grant);
   if (body.holder !== undefined && typeof body.holder !== "string") return { status: 400, body: { error: "holder must be a 64-hex pubkey string" } };
+  if (typeof body.holder === "string" && !HEX64.test(body.holder.toLowerCase())) {
+    return { status: 400, body: { error: "holder must be a 64-hex pubkey string" } };
+  }
   if (!v.ok) return { status: 200, body: { valid: false, reason: v.reason } };
-  if (typeof body.holder === "string" && body.holder !== v.holder) {
+  if (typeof body.holder === "string" && body.holder.toLowerCase() !== v.holder) {
     return { status: 200, body: { valid: false, reason: "grant is held by a different key", holder: v.holder } };
   }
   const t = v.template;
@@ -34,11 +63,16 @@ export function verifyGrantRequest(body: any) {
   };
 }
 
-async function fetchText(url: string): Promise<string | null> {
+type Fetched = { ok: true; text: string } | { ok: false; absent: boolean; why: string };
+
+/** Fail closed: only a plain 404 is "absent"; any other failure, a redirect or an oversize body is an error. */
+async function fetchText(url: string, max = MAX_FETCHED): Promise<Fetched> {
   const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS), redirect: "manual" });
-  if (!res.ok) return null;
-  const text = await res.text();
-  return text.length > 256 * 1024 ? null : text;
+  if (res.status === 404) return (await res.body?.cancel().catch(() => {}), { ok: false, absent: true, why: "not served" });
+  if (!res.ok) return (await res.body?.cancel().catch(() => {}), { ok: false, absent: false, why: `could not be read (${res.status})` });
+  const text = await readCapped(res.body, max);
+  if (text === null) return { ok: false, absent: false, why: "too large" };
+  return { ok: true, text };
 }
 
 /** Is `url` a live place with a valid manifest and place.md, and what does it accept? */
@@ -55,32 +89,34 @@ export async function verifyPlaceRequest(body: any) {
   const problems: string[] = [];
   let accepts: unknown;
   let place: string | undefined;
+  let placeMd: "ok" | "absent" | "error" = "error";
   try {
     const [manifest, md] = await Promise.all([
       fetchText(`${origin}/.well-known/placeschema.json`),
-      fetchText(`${origin}/.well-known/place.md`),
+      fetchText(`${origin}/.well-known/place.md`, MAX_PLACE_MD),
     ]);
-    if (manifest === null) problems.push("placeschema.json: not served");
+    if (!manifest.ok) problems.push(`placeschema.json: ${manifest.why}`);
     else {
       try {
-        const caps = validateCapabilities(JSON.parse(manifest));
+        const caps = validateCapabilities(JSON.parse(manifest.text));
         accepts = caps.accepts;
         place = caps.place;
       } catch (e) {
         problems.push(`placeschema.json: ${message(e)}`);
       }
     }
-    if (md !== null) {
+    placeMd = md.ok ? "ok" : md.absent ? "absent" : "error";
+    if (md.ok) {
       try {
-        parsePlaceTemplate(md);
+        parsePlaceTemplate(md.text);
       } catch (e) {
         problems.push(`place.md: ${message(e)}`);
       }
-    }
+    } else if (!md.absent) problems.push(`place.md: ${md.why}`); // a missing place.md is allowed; a broken one is not
   } catch (e) {
-    return { status: 200, body: { valid: false, live: false, origin, problems: [`unreachable: ${message(e)}`] } };
+    return { status: 200, body: { valid: false, live: false, origin, problems: ["unreachable"] } };
   }
-  return { status: 200, body: { valid: problems.length === 0, live: true, origin, place, accepts, problems } };
+  return { status: 200, body: { valid: problems.length === 0, live: true, origin, place, placeMd, accepts, problems } };
 }
 
 export async function handle(req: Request): Promise<Response> {
@@ -90,8 +126,10 @@ export async function handle(req: Request): Promise<Response> {
     const route = { "/v1/verify-grant": verifyGrantRequest, "/v1/verify-place": verifyPlaceRequest }[pathname];
     if (!route) return bad("not found", 404);
     if (req.method !== "POST") return bad("use POST with a JSON body", 405);
-    const text = await req.text();
-    if (text.length > MAX_BODY) return bad("body too large", 413);
+    const declared = Number(req.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > MAX_BODY) return bad("body too large", 413);
+    const text = await readCapped(req.body, MAX_BODY);
+    if (text === null) return bad("body too large", 413);
     let body: unknown;
     try {
       body = JSON.parse(text);
@@ -102,6 +140,7 @@ export async function handle(req: Request): Promise<Response> {
       const out = await route(body);
       return json(out.body, out.status);
     } catch (e) {
-      return bad(message(e), 422); // never 5xx on caller input
+      console.error("verify failed", e);
+      return bad("could not verify this request", 422); // never 5xx on caller input, and never echo internals
     }
 }

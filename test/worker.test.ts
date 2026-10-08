@@ -44,3 +44,48 @@ test("bad input is 4xx, never 5xx", async () => {
     assert.ok(status >= 400 && status < 500, `${path} ${status}`);
   }
 });
+
+const manifest = JSON.stringify({ place: "Forge", id: "forge", accepts: {}, prohibited: [], style_context: "viewer" });
+async function place(md: () => Response, man: () => Response = () => new Response(manifest)) {
+  const real = globalThis.fetch;
+  globalThis.fetch = (async (u: string) => (String(u).endsWith("placeschema.json") ? man() : md())) as typeof fetch;
+  try {
+    return await call("/v1/verify-place", { url: "https://forge.placeschema.com" });
+  } finally {
+    globalThis.fetch = real;
+  }
+}
+
+test("verify-place fails closed: only a 404 place.md is absent", async () => {
+  const absent = await place(() => new Response("no", { status: 404 }));
+  assert.equal(absent.body.valid, true);
+  assert.equal(absent.body.placeMd, "absent");
+  const big = await place(() => new Response("x".repeat(40_000)));
+  assert.equal(big.body.valid, false); // over the 32 KB place.md cap
+  assert.match(big.body.problems.join(" "), /place\.md: too large/);
+  for (const md of [() => new Response("boom", { status: 500 }), () => new Response("", { status: 302, headers: { location: "https://evil.example" } }), () => new Response("x".repeat(300_000))]) {
+    const r = await place(md);
+    assert.equal(r.status, 200);
+    assert.equal(r.body.valid, false, JSON.stringify(r.body));
+    assert.match(r.body.problems.join(" "), /place\.md: /);
+  }
+  const r = await place(() => new Response("garbage"));
+  assert.equal(r.body.valid, false);
+  const m = await place(() => new Response("no", { status: 404 }), () => new Response("boom", { status: 503 }));
+  assert.equal(m.body.valid, false);
+  assert.match(m.body.problems[0], /placeschema\.json: could not be read \(503\)/);
+});
+
+test("request bodies are capped in bytes without buffering", async () => {
+  assert.equal((await call("/v1/verify-grant", undefined, JSON.stringify({ pad: "é".repeat(40_000) }))).status, 413); // 80 KB of bytes, 40 K characters
+  const res = await handle(new Request("https://x/v1/verify-grant", { method: "POST", headers: { "content-length": "999999" }, body: "{}" }));
+  assert.equal(res.status, 413);
+});
+
+test("holder input is validated and normalised", async () => {
+  assert.equal((await call("/v1/verify-grant", { grant, holder: "nothex" })).status, 400);
+  assert.equal((await call("/v1/verify-grant", { grant, holder: holder.toUpperCase() })).body.valid, true);
+  const ok = await call("/v1/verify-grant", { grant, holder });
+  assert.equal(ok.body.holder, holder);
+  assert.equal(ok.body.minter, getPublicKey(minterSk));
+});
