@@ -119,11 +119,52 @@ export async function verifyPlaceRequest(body: any) {
   return { status: 200, body: { valid: problems.length === 0, live: true, origin, place, placeMd, accepts, problems } };
 }
 
-export async function handle(req: Request): Promise<Response> {
+export type Env = { LIMITER?: { limit(o: { key: string }): Promise<{ success: boolean }> }; BUILD_COMMIT?: string };
+
+const CACHE_SECONDS = 300;
+let warned = false;
+
+/** Fail open: a broken or missing limiter must never turn into a 5xx or a block. */
+async function limited(req: Request, env: Env): Promise<boolean> {
+  if (!env.LIMITER) return false;
+  try {
+    return !(await env.LIMITER.limit({ key: req.headers.get("cf-connecting-ip") ?? "unknown" })).success;
+  } catch (e) {
+    if (!warned) (warned = true, console.error("rate limiter failed; failing open", e));
+    return false;
+  }
+}
+
+/** Cache successful verify-place results per origin (the only part of the url that is fetched). */
+async function cachedPlace(body: any): Promise<{ status: number; body: any }> {
+  const cache = (globalThis as any).caches?.default as Cache | undefined;
+  let key: Request | undefined;
+  try {
+    key = new Request(`https://cache.invalid/verify-place?o=${encodeURIComponent(new URL(body?.url).origin)}`);
+  } catch {}
+  if (cache && key) {
+    try {
+      const hit = await cache.match(key);
+      if (hit) return { status: 200, body: await hit.json() };
+    } catch {}
+  }
+  const out = await verifyPlaceRequest(body);
+  if (cache && key && out.status === 200 && (out.body as any).valid === true) {
+    try {
+      await cache.put(key, new Response(JSON.stringify(out.body), { headers: { "cache-control": `max-age=${CACHE_SECONDS}` } }));
+    } catch {}
+  }
+  return out;
+}
+
+export async function handle(req: Request, env: Env = {}): Promise<Response> {
     const { pathname } = new URL(req.url);
-    if (req.method === "GET" && pathname === "/v1/version") return json({ name: "placeschema-verify", version: VERSION });
+    if (req.method === "GET" && pathname === "/v1/version") return json({ name: "placeschema-verify", version: VERSION, commit: env.BUILD_COMMIT ?? "" });
     if (req.method === "GET" && pathname === "/v1/health") return json({ ok: true });
-    const route = { "/v1/verify-grant": verifyGrantRequest, "/v1/verify-place": verifyPlaceRequest }[pathname];
+    if (req.method === "POST" && pathname.startsWith("/v1/") && (await limited(req, env))) {
+      return new Response(JSON.stringify({ error: "rate limited" }), { status: 429, headers: { "content-type": "application/json", "retry-after": "60" } });
+    }
+    const route = { "/v1/verify-grant": verifyGrantRequest, "/v1/verify-place": cachedPlace }[pathname];
     if (!route) return bad("not found", 404);
     if (req.method !== "POST") return bad("use POST with a JSON body", 405);
     const declared = Number(req.headers.get("content-length"));

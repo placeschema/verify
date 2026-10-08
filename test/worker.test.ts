@@ -2,7 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildGrantEventUnsigned } from "@placeschema/protocol";
 import { finalizeEvent, generateSecretKey, getPublicKey } from "nostr-tools/pure";
-import { handle } from "../src/verify.ts";
+import { handle as rawHandle, type Env } from "../src/verify.ts";
+
+let env: Env = {};
+const handle = (r: Request) => rawHandle(r, env);
 
 const minterSk = generateSecretKey();
 const holder = getPublicKey(generateSecretKey());
@@ -88,4 +91,75 @@ test("holder input is validated and normalised", async () => {
   const ok = await call("/v1/verify-grant", { grant, holder });
   assert.equal(ok.body.holder, holder);
   assert.equal(ok.body.minter, getPublicKey(minterSk));
+});
+
+const post = (path = "/v1/verify-grant", ip = "1.2.3.4") =>
+  handle(new Request(`https://x${path}`, { method: "POST", headers: { "cf-connecting-ip": ip }, body: "{}" }));
+
+test("rate limit: 429 over the limit, per IP, probes never limited", async () => {
+  const seen: string[] = [];
+  const counts = new Map<string, number>();
+  env = { LIMITER: { limit: async ({ key }) => (seen.push(key), counts.set(key, (counts.get(key) ?? 0) + 1), { success: counts.get(key)! <= 2 }) } };
+  try {
+    assert.equal((await post()).status, 400);
+    assert.equal((await post()).status, 400);
+    const res = await post();
+    assert.equal(res.status, 429);
+    assert.deepEqual(await res.json(), { error: "rate limited" });
+    assert.ok(res.headers.get("retry-after"));
+    assert.equal((await post("/v1/verify-grant", "5.6.7.8")).status, 400); // other IP unaffected
+    assert.deepEqual([...new Set(seen)], ["1.2.3.4", "5.6.7.8"]);
+    assert.equal((await call("/v1/version")).status, 200);
+    assert.equal((await call("/v1/health")).status, 200);
+    assert.equal(counts.size, 2); // GET probes never touched the limiter
+  } finally {
+    env = {};
+  }
+});
+
+test("rate limiter failure fails open", async () => {
+  env = { LIMITER: { limit: async () => { throw new Error("down"); } } };
+  const err = console.error;
+  console.error = () => {};
+  try {
+    assert.equal((await post()).status, 400);
+    assert.equal((await post()).status, 400);
+  } finally {
+    console.error = err;
+    env = {};
+  }
+});
+
+test("version includes commit", async () => {
+  assert.equal((await call("/v1/version")).body.commit, "");
+  env = { BUILD_COMMIT: "abc1234" };
+  try {
+    assert.equal((await call("/v1/version")).body.commit, "abc1234");
+  } finally {
+    env = {};
+  }
+});
+
+test("verify-place caches successes so a repeat does not refetch", async () => {
+  const store = new Map<string, Response>();
+  (globalThis as any).caches = {
+    default: {
+      match: async (r: Request) => store.get(r.url)?.clone(),
+      put: async (r: Request, res: Response) => void store.set(r.url, res),
+    },
+  };
+  let fetches = 0;
+  const real = globalThis.fetch;
+  globalThis.fetch = (async (u: string) => (fetches++, String(u).endsWith("placeschema.json") ? new Response(manifest) : new Response("no", { status: 404 }))) as typeof fetch;
+  try {
+    const a = await call("/v1/verify-place", { url: "https://forge.placeschema.com" });
+    const n = fetches;
+    const b = await call("/v1/verify-place", { url: "https://forge.placeschema.com/other/path" });
+    assert.equal(a.body.valid, true);
+    assert.deepEqual(b.body, a.body);
+    assert.equal(fetches, n);
+  } finally {
+    globalThis.fetch = real;
+    delete (globalThis as any).caches;
+  }
 });
