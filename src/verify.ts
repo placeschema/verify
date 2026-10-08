@@ -162,8 +162,8 @@ async function cachedPlace(body: any): Promise<{ status: number; body: any }> {
 
 export async function handle(req: Request, env: Env = {}): Promise<Response> {
     const { pathname } = new URL(req.url);
-    if (req.method === "GET" && pathname === "/v1/version") return json({ name: "placeschema-verify", version: VERSION, commit: env.BUILD_COMMIT ?? "" });
-    if (req.method === "GET" && pathname === "/v1/health") return json({ ok: true });
+    if (req.method === "GET" && pathname === "/v1/version") return json({ service: "placeschema-verify", name: "placeschema-verify", version: VERSION, commit: env.BUILD_COMMIT ?? "" });
+    if (req.method === "GET" && pathname === "/v1/health") return json({ ok: true, status: "ok" });
     if (req.method === "POST" && pathname.startsWith("/v1/") && (await limited(req, env))) {
       return new Response(JSON.stringify({ error: "rate limited" }), { status: 429, headers: { "content-type": "application/json", "retry-after": "60" } });
     }
