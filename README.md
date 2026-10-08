@@ -20,8 +20,8 @@ which this service does not do. `holder`, if you pass one, must be 64-hex (any c
 apply to delegations and carry records, never to a grant, so they are not consulted here.
 
 **What `verify-place` does when something is wrong.** Only a 404 for `place.md` means "no place.md".
-Any other failure (an error status, a redirect, a file over 256 KB) is reported in `problems` and
-`valid` is false. The same goes for `placeschema.json`.
+Any other failure (an error status, a redirect, a `place.md` over 32 KB, a `placeschema.json` over 256 KB) is reported in `problems` and
+`valid` is false. The same goes for `placeschema.json`. The response says `placeMd: "ok" | "absent" | "error"`, so a manifest-only place is visible as such.
 
 ```sh
 curl -X POST "$BASE/v1/verify-place" -d '{"url":"https://forge.placeschema.com"}'

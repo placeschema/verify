@@ -12,6 +12,8 @@ export const KNOWN_ORIGINS = new Set([
 
 const MAX_BODY = 64 * 1024; // bytes
 const MAX_FETCHED = 256 * 1024; // bytes
+// ponytail: place.md heading regex in the protocol parser is quadratic (PLACE-769); 32 KB bounds it until it is fixed upstream.
+const MAX_PLACE_MD = 32 * 1024;
 const FETCH_TIMEOUT_MS = 10_000;
 const HEX64 = /^[0-9a-f]{64}$/;
 
@@ -64,11 +66,11 @@ export function verifyGrantRequest(body: any) {
 type Fetched = { ok: true; text: string } | { ok: false; absent: boolean; why: string };
 
 /** Fail closed: only a plain 404 is "absent"; any other failure, a redirect or an oversize body is an error. */
-async function fetchText(url: string): Promise<Fetched> {
+async function fetchText(url: string, max = MAX_FETCHED): Promise<Fetched> {
   const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS), redirect: "manual" });
-  if (res.status === 404) return { ok: false, absent: true, why: "not served" };
-  if (!res.ok) return { ok: false, absent: false, why: `could not be read (${res.status})` };
-  const text = await readCapped(res.body, MAX_FETCHED);
+  if (res.status === 404) return (await res.body?.cancel().catch(() => {}), { ok: false, absent: true, why: "not served" });
+  if (!res.ok) return (await res.body?.cancel().catch(() => {}), { ok: false, absent: false, why: `could not be read (${res.status})` });
+  const text = await readCapped(res.body, max);
   if (text === null) return { ok: false, absent: false, why: "too large" };
   return { ok: true, text };
 }
@@ -87,10 +89,11 @@ export async function verifyPlaceRequest(body: any) {
   const problems: string[] = [];
   let accepts: unknown;
   let place: string | undefined;
+  let placeMd: "ok" | "absent" | "error" = "error";
   try {
     const [manifest, md] = await Promise.all([
       fetchText(`${origin}/.well-known/placeschema.json`),
-      fetchText(`${origin}/.well-known/place.md`),
+      fetchText(`${origin}/.well-known/place.md`, MAX_PLACE_MD),
     ]);
     if (!manifest.ok) problems.push(`placeschema.json: ${manifest.why}`);
     else {
@@ -102,6 +105,7 @@ export async function verifyPlaceRequest(body: any) {
         problems.push(`placeschema.json: ${message(e)}`);
       }
     }
+    placeMd = md.ok ? "ok" : md.absent ? "absent" : "error";
     if (md.ok) {
       try {
         parsePlaceTemplate(md.text);
@@ -110,9 +114,9 @@ export async function verifyPlaceRequest(body: any) {
       }
     } else if (!md.absent) problems.push(`place.md: ${md.why}`); // a missing place.md is allowed; a broken one is not
   } catch (e) {
-    return { status: 200, body: { valid: false, live: false, origin, problems: [`unreachable: ${message(e)}`] } };
+    return { status: 200, body: { valid: false, live: false, origin, problems: ["unreachable"] } };
   }
-  return { status: 200, body: { valid: problems.length === 0, live: true, origin, place, accepts, problems } };
+  return { status: 200, body: { valid: problems.length === 0, live: true, origin, place, placeMd, accepts, problems } };
 }
 
 export async function handle(req: Request): Promise<Response> {
@@ -136,6 +140,7 @@ export async function handle(req: Request): Promise<Response> {
       const out = await route(body);
       return json(out.body, out.status);
     } catch (e) {
+      console.error("verify failed", e);
       return bad("could not verify this request", 422); // never 5xx on caller input, and never echo internals
     }
 }

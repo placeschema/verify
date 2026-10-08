@@ -57,7 +57,12 @@ async function place(md: () => Response, man: () => Response = () => new Respons
 }
 
 test("verify-place fails closed: only a 404 place.md is absent", async () => {
-  assert.equal((await place(() => new Response("no", { status: 404 }))).body.valid, true);
+  const absent = await place(() => new Response("no", { status: 404 }));
+  assert.equal(absent.body.valid, true);
+  assert.equal(absent.body.placeMd, "absent");
+  const big = await place(() => new Response("x".repeat(40_000)));
+  assert.equal(big.body.valid, false); // over the 32 KB place.md cap
+  assert.match(big.body.problems.join(" "), /place\.md: too large/);
   for (const md of [() => new Response("boom", { status: 500 }), () => new Response("", { status: 302, headers: { location: "https://evil.example" } }), () => new Response("x".repeat(300_000))]) {
     const r = await place(md);
     assert.equal(r.status, 200);
