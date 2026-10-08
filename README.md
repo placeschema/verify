@@ -9,8 +9,19 @@ All calls take and return JSON. Bad input gets a 4xx, never a 5xx.
 | Call | What it answers |
 |---|---|
 | `GET /v1/version`, `GET /v1/health` | Liveness. |
-| `POST /v1/verify-grant` `{ grant, holder? }` | Is this signed item grant (a kind-30080 Nostr event) genuine? It returns the holder, the minter, the item and its licensed sources. The check is offline. |
+| `POST /v1/verify-grant` `{ grant, holder? }` | Is this signed item grant (a kind-30080 Nostr event) authentic? It returns the holder, the minter, the item and its licensed sources. The check is offline. |
 | `POST /v1/verify-place` `{ url }` | Is this a live place with a valid `/.well-known/placeschema.json` (and a valid `place.md` when one is served), and what items does it accept? v1 checks known PlaceSchema origins only. |
+
+**What `verify-grant` attests.** `valid: true` means the grant is an authentic issuance by `minter`:
+well-formed, signed by the template's own minter key, and naming `holder` as the key it was minted to.
+It does not say the holder still has the item, and it does not say `minter` is a trustworthy world:
+any key can mint a valid grant, so decide which minters you trust. Possession is carry verification,
+which this service does not do. `holder`, if you pass one, must be 64-hex (any case). Revocation floors
+apply to delegations and carry records, never to a grant, so they are not consulted here.
+
+**What `verify-place` does when something is wrong.** Only a 404 for `place.md` means "no place.md".
+Any other failure (an error status, a redirect, a file over 256 KB) is reported in `problems` and
+`valid` is false. The same goes for `placeschema.json`.
 
 ```sh
 curl -X POST "$BASE/v1/verify-place" -d '{"url":"https://forge.placeschema.com"}'
