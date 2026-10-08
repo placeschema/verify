@@ -9,22 +9,22 @@ All calls take and return JSON. Bad input gets a 4xx, never a 5xx.
 **Limits.** `POST /v1/*` is limited to 60 requests per 60 s per client IP (`CF-Connecting-IP`); over that you get
 `429 {"error":"rate limited"}` with `retry-after: 60`. `GET /v1/version` and `/v1/health` are never limited.
 Successful `verify-place` results are cached for 300 s per origin. If the limiter is missing or errors, requests are served normally (fail open).
-`GET /v1/version` also returns `commit` (the `BUILD_COMMIT` var set at deploy; empty if unset) so a deploy can be checked.
+`GET /v1/version` returns `service` (the POKT service ID) and `commit` (the `BUILD_COMMIT` var set at deploy; empty if unset) so a deploy can be checked.
 
 | Call | What it answers |
 |---|---|
-| `GET /v1/version`, `GET /v1/health` | Liveness. |
+| `GET /v1/version`, `GET /v1/health` | Identity and liveness: `{service, name, version, commit}`, `{ok: true, status: "ok"}`. |
 | `POST /v1/verify-grant` `{ grant, holder? }` | Is this signed item grant (a kind-30080 Nostr event) authentic? It returns the holder, the minter, the item and its licensed sources. The check is offline. |
 | `POST /v1/stash` `{ holder, grants? }` | Which items does a key publicly report as deposited or redeemed? Signed kind-30083 receipts are read from the relay. Pass grant events to verify their issuance. |
 | `POST /v1/verify-place` `{ url }` | Is this a live place with a valid `/.well-known/placeschema.json` (and a valid `place.md` when one is served), and what items does it accept? v1 checks known PlaceSchema origins only. |
 
 ## Try it
 
-Base URL: `https://placeschema-verify.lively-voice-30ac.workers.dev`
+Base URL: `https://verify.placeschema.com`
 
 ```sh
-BASE=https://placeschema-verify.lively-voice-30ac.workers.dev
-curl $BASE/v1/version     # {"name":"placeschema-verify","version":"0.1.0","commit":"…"}
+BASE=https://verify.placeschema.com
+curl $BASE/v1/version     # {"service":"placeschema","name":"placeschema-verify","version":"0.1.0","commit":"…"}
 curl -X POST $BASE/v1/verify-place -d '{"url":"https://forge.placeschema.com"}'
 curl -X POST $BASE/v1/verify-grant -d @test/sample-grant.json   # valid: true
 HOLDER=$(node -e 'const fs=require("fs"); console.log(JSON.parse(fs.readFileSync("test/sample-grant.json", "utf8")).grant.tags.find(t=>t[0]==="p")[1])')
