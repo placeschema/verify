@@ -26,6 +26,8 @@ const call = async (path: string, body?: unknown, raw?: string) => {
 test("probes", async () => {
   assert.equal((await call("/v1/version")).body.version, "0.1.0");
   assert.equal((await call("/v1/health")).body.ok, true);
+  assert.equal((await call("/v1/version")).body.service, "placeschema");
+  assert.equal((await call("/v1/health")).body.status, "ok");
 });
 
 test("verify-grant: genuine, wrong holder, forged", async () => {

@@ -1,0 +1,6 @@
+# The RelayMiner's backend: forwards every relay to the live Worker.
+:8080 {
+	reverse_proxy https://verify.placeschema.com {
+		header_up Host {upstream_hostport}
+	}
+}
