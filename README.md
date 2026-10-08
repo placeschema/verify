@@ -19,11 +19,11 @@ Successful `verify-place` results are cached for 300 s per origin. If the limite
 
 ## Try it
 
-Base URL: `https://placeschema-verify.lively-voice-30ac.workers.dev`
+Base URL: `https://verify.placeschema.com`
 
 ```sh
-BASE=https://placeschema-verify.lively-voice-30ac.workers.dev
-curl $BASE/v1/version     # {"service":"placeschema-verify","name":"placeschema-verify","version":"0.1.0","commit":"…"}
+BASE=https://verify.placeschema.com
+curl $BASE/v1/version     # {"service":"placeschema","name":"placeschema-verify","version":"0.1.0","commit":"…"}
 curl -X POST $BASE/v1/verify-place -d '{"url":"https://forge.placeschema.com"}'
 curl -X POST $BASE/v1/verify-grant -d @test/sample-grant.json   # valid: true
 ```

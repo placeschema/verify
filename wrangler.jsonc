@@ -3,6 +3,8 @@
   "main": "src/worker.ts",
   "compatibility_date": "2026-10-01",
   "workers_dev": true,
+  // Public API host; the workers.dev URL stays up as a fallback.
+  "routes": [{ "pattern": "verify.placeschema.com", "custom_domain": true }],
   // Fetch our own Pages-hosted places over the public internet (avoids error 1042).
   "compatibility_flags": ["global_fetch_strictly_public"],
   // v1 is free; POKT's portal bills. Payee for a later paid path (Seth, 2026-10-07): set once, here.
