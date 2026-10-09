@@ -2,6 +2,8 @@
 :8080 {
 	# PSM requires GET / to answer 2xx with JSON; serve the identity response there.
 	rewrite / /v1/version
+	# PSM's deploy waits for /healthz to answer.
+	rewrite /healthz /v1/health
 	reverse_proxy https://verify.placeschema.com {
 		header_up Host {upstream_hostport}
 	}
