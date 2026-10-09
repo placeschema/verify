@@ -1,0 +1,45 @@
+{
+  "schema": "pocket-service-card/v1",
+  "description": "PlaceSchema verification. POST /v1/verify-grant {grant, holder?} checks a signed item grant (Nostr kind-30080 event) offline and returns valid, holder, minter, item hash, type, label and licensed sources. POST /v1/verify-place {url} checks a known PlaceSchema origin's /.well-known/placeschema.json (and place.md) and returns what items it accepts. POST /v1/stash {holder, grants?} lists the items a key reports as deposited or redeemed, verifying grants where it can. JSON in and out; bad input is 4xx, never 5xx. Free.",
+  "rpc_types": [
+    {
+      "type": "REST",
+      "intent": "expected",
+      "backend_hint": "Caddy proxy (placeschema/backend) to the Cloudflare Worker at https://verify.placeschema.com",
+      "notes": "GET /v1/version, GET /v1/health, GET /openapi.json, POST /v1/verify-grant, POST /v1/verify-place and POST /v1/stash."
+    }
+  ],
+  "apis": ["placeschema-verify-api"],
+  "specs": [
+    { "api": "placeschema-verify-api", "kind": "openapi", "url": "https://verify.placeschema.com/openapi.json" }
+  ],
+  "access": "public",
+  "results": "deterministic",
+  "serving": {
+    "backend": "The placeschema/verify Worker behind a RelayMiner using the rest backend.",
+    "implementations": ["placeschema/verify 0.1.0"],
+    "docs": "https://github.com/placeschema/verify#readme",
+    "healthcheck": [
+      {
+        "rpc_type": "REST",
+        "request": { "path": "/v1/version", "method": "GET" },
+        "expect": { "json_path": "$.service", "matches": "^placeschema$" },
+        "notes": "Identity probe."
+      },
+      {
+        "rpc_type": "REST",
+        "request": { "path": "/v1/health", "method": "GET" },
+        "expect": { "json_path": "$.status", "matches": "^ok$" }
+      },
+      {
+        "rpc_type": "REST",
+        "request": { "path": "/v1/verify-place", "method": "POST", "body": { "url": "https://hub.placeschema.com" } },
+        "expect": { "json_path": "$.valid", "matches": "^true$" },
+        "notes": "Functional probe."
+      }
+    ],
+    "notes": "POST /v1/* is limited to 60 requests per 60 s per client IP; relays share the supplier's IP, so this is the cap per supplier."
+  },
+  "docs": "https://github.com/placeschema/verify#readme",
+  "updated": "2026-10-09"
+}
