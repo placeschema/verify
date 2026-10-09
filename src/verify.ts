@@ -287,6 +287,11 @@ async function cachedPlace(body: any): Promise<{ status: number; body: any }> {
 }
 
 export async function handle(req: Request, env: Env = {}): Promise<Response> {
+    // HEAD is GET without the body; link checkers such as the POKT audit probe spec URLs with it.
+    if (req.method === "HEAD") {
+      const res = await handle(new Request(req.url, { method: "GET", headers: req.headers }), env);
+      return new Response(null, { status: res.status, headers: res.headers });
+    }
     const { pathname } = new URL(req.url);
     if (req.method === "GET" && pathname === "/v1/version") return json({ service: "placeschema", name: "placeschema-verify", version: VERSION, commit: env.BUILD_COMMIT ?? "" });
     if (req.method === "GET" && pathname === "/v1/health") return json({ ok: true, status: "ok" });
