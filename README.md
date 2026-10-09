@@ -15,6 +15,7 @@ Successful `verify-place` results are cached for 300 s per origin. If the limite
 |---|---|
 | `GET /v1/version`, `GET /v1/health` | Identity and liveness: `{service, name, version, commit}`, `{ok: true, status: "ok"}`. |
 | `POST /v1/verify-grant` `{ grant, holder? }` | Is this signed item grant (a kind-30080 Nostr event) authentic? It returns the holder, the minter, the item and its licensed sources. The check is offline. |
+| `POST /v1/stash` `{ holder, grants? }` | Which items does a key publicly report as deposited or redeemed? Signed kind-30083 receipts are read from the relay. Pass grant events to verify their issuance. |
 | `POST /v1/verify-place` `{ url }` | Is this a live place with a valid `/.well-known/placeschema.json` (and a valid `place.md` when one is served), and what items does it accept? v1 checks known PlaceSchema origins only. |
 
 ## Try it
@@ -26,10 +27,26 @@ BASE=https://verify.placeschema.com
 curl $BASE/v1/version     # {"service":"placeschema","name":"placeschema-verify","version":"0.1.0","commit":"…"}
 curl -X POST $BASE/v1/verify-place -d '{"url":"https://forge.placeschema.com"}'
 curl -X POST $BASE/v1/verify-grant -d @test/sample-grant.json   # valid: true
+HOLDER=$(node -e 'const fs=require("fs"); console.log(JSON.parse(fs.readFileSync("test/sample-grant.json", "utf8")).grant.tags.find(t=>t[0]==="p")[1])')
+curl -X POST "$BASE/v1/stash" -H 'content-type: application/json' -d "{\"holder\":\"$HOLDER\"}"
 ```
 
 `verify-grant` returns `{ valid, holder, minter, item, type, label, sources: [{ author, license }] }`
 or `{ valid: false, reason }`. `test/sample-grant.json` is signed with a throwaway key.
+
+`stash` returns `{ holder, items, count, problems }`, with at most 100 items. Each item has a
+grant id, a `deposited` or `redeemed` status, and verification details. `verified: false` means
+the signed receipt is self-reported by the holder; the underlying grant has not been checked.
+To fully verify a matching item, include its signed kind-30080 grant event in `grants`:
+
+```sh
+node -e 'const fs=require("fs"); const grant=JSON.parse(fs.readFileSync("test/sample-grant.json", "utf8")).grant; console.log(JSON.stringify({holder:grant.tags.find(t=>t[0]==="p")[1],grants:[grant]}))' |
+  curl -X POST "$BASE/v1/stash" -H 'content-type: application/json' --data-binary @-
+```
+
+Matching valid grants add `verified: true`, `minter`, `author`, and `license` to the item.
+The relay URL defaults to `wss://nostr.placeschema.com` and can be set with `STASH_RELAY`.
+If the relay cannot be reached, `items` is empty and `problems` explains why.
 
 **What `verify-grant` attests.** `valid: true` means the grant is an authentic issuance by `minter`:
 well-formed, signed by the template's own minter key, and naming `holder` as the key it was minted to.
