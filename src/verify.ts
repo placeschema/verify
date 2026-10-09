@@ -122,11 +122,14 @@ export async function verifyPlaceRequest(body: any) {
   return { status: 200, body: { valid: problems.length === 0, live: true, origin, place, placeMd, accepts, problems } };
 }
 
-export type Env = { LIMITER?: { limit(o: { key: string }): Promise<{ success: boolean }> }; BUILD_COMMIT?: string; STASH_RELAY?: string };
+export type Env = { LIMITER?: { limit(o: { key: string }): Promise<{ success: boolean }> }; BUILD_COMMIT?: string; STASH_RELAY?: string; REGISTRAR_URL?: string };
 
 const STASH_KIND = 30083;
 const STASH_TIMEOUT_MS = 7_000;
 const STASH_NOTE = "self-reported by the holder; grant not verified";
+const REGISTRAR_URL = "https://panel.placeschema.com";
+const MAX_REGISTRAR_FETCHES = 20;
+const MAX_REGISTRAR_BODY = 16 * 1024;
 type Receipt = { id: string; kind: number; pubkey: string; created_at: number; tags: string[][]; content: string; sig: string };
 
 function receiptTag(ev: Receipt, name: string): string | undefined {
@@ -181,7 +184,7 @@ async function readStashReceipts(holder: string, relay: string): Promise<Receipt
   }
 }
 
-/** List a holder's signed, self-reported receipts; supplied grants add offline provenance. */
+/** List a holder's signed receipts and check matching grants supplied or served by the registrar. */
 export async function stashRequest(body: any, env: Env = {}) {
   if (typeof body?.holder !== "string" || !HEX64.test(body.holder.toLowerCase())) {
     return { status: 400, body: { error: "holder must be a 64-hex pubkey string" } };
@@ -189,13 +192,19 @@ export async function stashRequest(body: any, env: Env = {}) {
   const holder = body.holder.toLowerCase();
   const problems: string[] = [];
   const grants = new Map<string, { minter: string; author: string; license: string }>();
+  const suppliedIds = new Set<string>();
   if (body.grants !== undefined && !Array.isArray(body.grants)) return { status: 400, body: { error: "grants must be an array" } };
-  for (const supplied of body.grants ?? []) {
-    const verdict = verifyGrantEvent(supplied);
-    if (!verdict.ok) { problems.push(`invalid grant: ${verdict.reason}`); continue; }
-    if (verdict.holder !== holder) { problems.push(`grant ${verdict.id} is held by a different key`); continue; }
+  const addGrant = (event: any): string | undefined => {
+    const verdict = verifyGrantEvent(event);
+    if (!verdict.ok) return `invalid grant: ${verdict.reason}`;
+    if (verdict.holder !== holder) return `grant ${verdict.id} is held by a different key`;
     const source = verdict.template.sources?.[0];
     grants.set(verdict.id, { minter: verdict.minter, author: source?.author ?? "", license: source?.license ?? "" });
+  };
+  for (const supplied of body.grants ?? []) {
+    if (typeof supplied?.id === "string" && HEX64.test(supplied.id)) suppliedIds.add(supplied.id);
+    const problem = addGrant(supplied);
+    if (problem) problems.push(problem);
   }
   let receipts: Receipt[];
   try { receipts = await readStashReceipts(holder, env.STASH_RELAY ?? "wss://nostr.placeschema.com"); }
@@ -208,7 +217,30 @@ export async function stashRequest(body: any, env: Env = {}) {
     const previous = newest.get(grant);
     if (!previous || ev.created_at > previous.created_at || (ev.created_at === previous.created_at && ev.id > previous.id)) newest.set(grant, ev);
   }
-  const items = [...newest.entries()].sort((a, b) => b[1].created_at - a[1].created_at || b[1].id.localeCompare(a[1].id)).slice(0, 100).map(([grant, ev]) => {
+  const selected = [...newest.entries()].sort((a, b) => b[1].created_at - a[1].created_at || b[1].id.localeCompare(a[1].id)).slice(0, 100);
+  const candidates = selected.filter(([id]) => HEX64.test(id) && !suppliedIds.has(id)).slice(0, MAX_REGISTRAR_FETCHES);
+  await Promise.all(candidates.map(async ([id]) => {
+    try {
+      const response = await fetch(`${(env.REGISTRAR_URL ?? REGISTRAR_URL).replace(/\/$/, "")}/grants/${id}`, {
+        signal: AbortSignal.timeout(3_000), redirect: "manual", credentials: "omit",
+      });
+      if (response.status !== 200) {
+        await response.body?.cancel().catch(() => {});
+        problems.push(`grant ${id}: registrar returned ${response.status}`);
+        return;
+      }
+      const text = await readCapped(response.body, MAX_REGISTRAR_BODY);
+      if (text === null) { problems.push(`grant ${id}: registrar response too large`); return; }
+      const payload = JSON.parse(text);
+      const event = payload?.grant ?? payload;
+      if (event?.id !== id) { problems.push(`grant ${id}: registrar id mismatch`); return; }
+      const problem = addGrant(event);
+      if (problem) problems.push(`grant ${id}: ${problem}`);
+    } catch {
+      problems.push(`grant ${id}: registrar lookup failed`);
+    }
+  }));
+  const items = selected.map(([grant, ev]) => {
     const checked = grants.get(grant);
     return checked
       ? { grant, status: receiptTag(ev, "status"), verified: true, ...checked }
