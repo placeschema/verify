@@ -1,5 +1,7 @@
 # The RelayMiner's backend: forwards every relay to the live Worker.
 :8080 {
+	# PSM requires GET / to answer 2xx with JSON; serve the identity response there.
+	rewrite / /v1/version
 	reverse_proxy https://verify.placeschema.com {
 		header_up Host {upstream_hostport}
 	}
