@@ -1,0 +1,13 @@
+{
+  "service_id": "placeschema",
+  "name": "PlaceSchema",
+  "compute_units_per_relay": 100,
+  "card": "",
+  "networks": {
+    "beta": {
+      "deploy_host": "placeschema-pokt",
+      "deploy_path": "/opt/pocket/supplier-beta",
+      "deployed_at": "2026-10-09T15:58:08.757Z"
+    }
+  }
+}

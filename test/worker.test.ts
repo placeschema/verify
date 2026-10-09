@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildGrantEventUnsigned } from "@placeschema/protocol";
 import { finalizeEvent, generateSecretKey, getPublicKey } from "nostr-tools/pure";
-import { handle as rawHandle, type Env } from "../src/verify.ts";
+import { handle as rawHandle, isKnownOrigin, type Env } from "../src/verify.ts";
 
 let env: Env = {};
 const handle = (r: Request) => rawHandle(r, env);
@@ -63,6 +63,13 @@ test("probes", async () => {
   assert.equal((await call("/v1/health")).body.status, "ok");
 });
 
+test("openapi.json documents every route", async () => {
+  const spec = (await call("/openapi.json")).body;
+  assert.equal(spec.openapi, "3.1.0");
+  assert.deepEqual(Object.keys(spec.paths).sort(), ["/openapi.json", "/v1/health", "/v1/stash", "/v1/verify-grant", "/v1/verify-place", "/v1/version"]);
+  for (const p of ["/v1/stash", "/v1/verify-grant", "/v1/verify-place"]) assert.equal((await call(p, undefined)).status, 405, p);
+});
+
 test("verify-grant: genuine, wrong holder, forged", async () => {
   const ok = await call("/v1/verify-grant", { grant, holder });
   assert.equal(ok.status, 200, JSON.stringify(ok.body));
@@ -80,6 +87,38 @@ test("bad input is 4xx, never 5xx", async () => {
   ] as const) {
     const { status } = await call(path, body, raw);
     assert.ok(status >= 400 && status < 500, `${path} ${status}`);
+  }
+});
+
+test("verify-place accepts the Hub, Forge and try worlds only", () => {
+  for (const ok of ["https://hub.placeschema.com", "https://forge.placeschema.com", "https://demo.try.placeschema.com", "https://a-1.try.placeschema.com"]) {
+    assert.ok(isKnownOrigin(ok), ok);
+  }
+  for (const no of [
+    "https://shop.placeschema.com", "https://voxel.placeschema.com", "https://liminal.placeschema.com", "https://zombie.placeschema.com",
+    "http://demo.try.placeschema.com", "https://demo.try.placeschema.com:8443", "https://a.b.try.placeschema.com",
+    "https://-x.try.placeschema.com", "https://try.placeschema.com", "https://demo.try.placeschema.com.evil.example",
+  ]) {
+    assert.ok(!isKnownOrigin(no), no);
+  }
+});
+
+test("an unknown origin is a 422 that lists what is accepted", async () => {
+  const r = await call("/v1/verify-place", { url: "https://shop.placeschema.com" });
+  assert.equal(r.status, 422);
+  assert.deepEqual(r.body.known, ["https://hub.placeschema.com", "https://forge.placeschema.com", "https://<slug>.try.placeschema.com"]);
+  // The handler normalises with new URL().origin before matching.
+  for (const url of ["https://hub.placeschema.com./", "https://evil.example\\@hub.placeschema.com/", "https://hub.placeschema.com@evil.example/", "https://hub.placeschema.com:8443/"]) {
+    assert.equal((await call("/v1/verify-place", { url })).status, 422, url);
+  }
+  const real = globalThis.fetch;
+  globalThis.fetch = (async () => new Response("no", { status: 404 })) as typeof fetch;
+  try {
+    for (const url of ["https://HUB.placeschema.com:443/x", "https://u:p@Demo.try.placeschema.com/"]) {
+      assert.notEqual((await call("/v1/verify-place", { url })).status, 422, url);
+    }
+  } finally {
+    globalThis.fetch = real;
   }
 });
 

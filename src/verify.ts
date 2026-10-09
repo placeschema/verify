@@ -1,17 +1,15 @@
 import { parsePlaceTemplate, validateCapabilities, verifyGrantEvent } from "@placeschema/protocol";
 import { verifyEvent } from "nostr-tools/pure";
+import { OPENAPI } from "./openapi.ts";
 
 export const VERSION = "0.1.0";
 
-// ponytail: fixed allowlist; outsider URLs wait for PS265's fetch protection.
-export const KNOWN_ORIGINS = new Set([
-  "https://hub.placeschema.com",
-  "https://shop.placeschema.com",
-  "https://forge.placeschema.com",
-  "https://voxel.placeschema.com",
-  "https://liminal.placeschema.com",
-  "https://zombie.placeschema.com",
-]);
+// ponytail: fixed allowlist plus our own test-world subdomains; outsider URLs wait for PS265's fetch protection.
+export const KNOWN_ORIGINS = new Set(["https://hub.placeschema.com", "https://forge.placeschema.com"]);
+// Test worlds are published by anyone but served from our domain; every fetch is size-, time- and redirect-capped.
+const TRY_ORIGIN = /^https:\/\/[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.try\.placeschema\.com$/;
+export const TRY_PATTERN = "https://<slug>.try.placeschema.com";
+export const isKnownOrigin = (origin: string) => KNOWN_ORIGINS.has(origin) || TRY_ORIGIN.test(origin);
 
 const MAX_BODY = 64 * 1024; // bytes
 const MAX_FETCHED = 256 * 1024; // bytes
@@ -86,8 +84,8 @@ export async function verifyPlaceRequest(body: any) {
   } catch {
     return { status: 400, body: { error: "url is required" } };
   }
-  if (!KNOWN_ORIGINS.has(origin)) {
-    return { status: 422, body: { error: "only known PlaceSchema origins are checked in v1", known: [...KNOWN_ORIGINS] } };
+  if (!isKnownOrigin(origin)) {
+    return { status: 422, body: { error: "only known PlaceSchema origins are checked in v1", known: [...KNOWN_ORIGINS, TRY_PATTERN] } };
   }
   const problems: string[] = [];
   let accepts: unknown;
@@ -292,6 +290,7 @@ export async function handle(req: Request, env: Env = {}): Promise<Response> {
     const { pathname } = new URL(req.url);
     if (req.method === "GET" && pathname === "/v1/version") return json({ service: "placeschema", name: "placeschema-verify", version: VERSION, commit: env.BUILD_COMMIT ?? "" });
     if (req.method === "GET" && pathname === "/v1/health") return json({ ok: true, status: "ok" });
+    if (req.method === "GET" && pathname === "/openapi.json") return json(OPENAPI);
     if (req.method === "POST" && pathname.startsWith("/v1/") && (await limited(req, env))) {
       return new Response(JSON.stringify({ error: "rate limited" }), { status: 429, headers: { "content-type": "application/json", "retry-after": "60" } });
     }
