@@ -68,7 +68,7 @@ test("openapi.json documents every route", async () => {
   assert.equal(spec.openapi, "3.1.0");
   assert.deepEqual(Object.keys(spec.paths).sort(), ["/openapi.json", "/v1/health", "/v1/stash", "/v1/verify-grant", "/v1/verify-place", "/v1/version"]);
   for (const p of ["/v1/stash", "/v1/verify-grant", "/v1/verify-place"]) assert.equal((await call(p, undefined)).status, 405, p);
-  for (const [p, want] of [["/openapi.json", 200], ["/v1/version", 200], ["/v1/health", 200], ["/nope", 404]] as const) {
+  for (const [p, want] of [["/openapi.json", 200], ["/v1/version", 200], ["/v1/health", 200], ["/nope", 404], ["/v1/stash", 405]] as const) {
     const res = await handle(new Request(`https://x${p}`, { method: "HEAD" }));
     assert.equal(res.status, want, `HEAD ${p}`);
     assert.equal(await res.text(), "", `HEAD ${p} has no body`);
