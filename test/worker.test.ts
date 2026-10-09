@@ -66,7 +66,7 @@ test("probes", async () => {
 test("openapi.json documents every route", async () => {
   const spec = (await call("/openapi.json")).body;
   assert.equal(spec.openapi, "3.1.0");
-  assert.deepEqual(Object.keys(spec.paths).sort(), ["/v1/health", "/v1/stash", "/v1/verify-grant", "/v1/verify-place", "/v1/version"]);
+  assert.deepEqual(Object.keys(spec.paths).sort(), ["/openapi.json", "/v1/health", "/v1/stash", "/v1/verify-grant", "/v1/verify-place", "/v1/version"]);
   for (const p of ["/v1/stash", "/v1/verify-grant", "/v1/verify-place"]) assert.equal((await call(p, undefined)).status, 405, p);
 });
 
@@ -107,6 +107,19 @@ test("an unknown origin is a 422 that lists what is accepted", async () => {
   const r = await call("/v1/verify-place", { url: "https://shop.placeschema.com" });
   assert.equal(r.status, 422);
   assert.deepEqual(r.body.known, ["https://hub.placeschema.com", "https://forge.placeschema.com", "https://<slug>.try.placeschema.com"]);
+  // The handler normalises with new URL().origin before matching.
+  for (const url of ["https://hub.placeschema.com./", "https://evil.example\\@hub.placeschema.com/", "https://hub.placeschema.com@evil.example/", "https://hub.placeschema.com:8443/"]) {
+    assert.equal((await call("/v1/verify-place", { url })).status, 422, url);
+  }
+  const real = globalThis.fetch;
+  globalThis.fetch = (async () => new Response("no", { status: 404 })) as typeof fetch;
+  try {
+    for (const url of ["https://HUB.placeschema.com:443/x", "https://u:p@Demo.try.placeschema.com/"]) {
+      assert.notEqual((await call("/v1/verify-place", { url })).status, 422, url);
+    }
+  } finally {
+    globalThis.fetch = real;
+  }
 });
 
 const manifest = JSON.stringify({ place: "Forge", id: "forge", accepts: {}, prohibited: [], style_context: "viewer" });

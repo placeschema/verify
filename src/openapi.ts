@@ -2,12 +2,11 @@
 const error = { type: "object", required: ["error"], properties: { error: { type: "string" } } };
 const errors = {
   "400": { description: "Bad input: missing or malformed field, or a body that is not JSON.", content: { "application/json": { schema: error } } },
-  "404": { description: "Unknown path.", content: { "application/json": { schema: error } } },
   "405": { description: "Wrong method; the call routes take POST with a JSON body.", content: { "application/json": { schema: error } } },
   "413": { description: "Body over 64 KB.", content: { "application/json": { schema: error } } },
   "422": { description: "The request could not be verified.", content: { "application/json": { schema: error } } },
   "429": {
-    description: "Over 60 POST requests in 60 s from one client IP. Through POKT every relay arrives from the supplier's IP, so this is the cap for the whole POKT service.",
+    description: "Over 60 POST requests in 60 s from one client IP. Through POKT every relay arrives from its supplier's IP, so this is the cap per supplier (the whole service while there is one supplier).",
     headers: { "retry-after": { schema: { type: "string", example: "60" } } },
     content: { "application/json": { schema: error } },
   },
@@ -26,11 +25,12 @@ export const OPENAPI = {
   info: {
     title: "PlaceSchema verify",
     version: "0.1.0",
-    description: "Verification for PlaceSchema items and places. JSON in and out; bad input is 4xx, never 5xx. Free. POKT service ID `placeschema` (Beta TestNet).",
+    description: "Verification for PlaceSchema items and places. JSON in and out; bad input is 4xx, never 5xx. Free. POKT service ID `placeschema` (Beta TestNet). Any unknown path is a 404 `{\"error\":\"not found\"}`; a POST under /v1/ may be rate limited (429) before that.",
     license: { name: "Apache-2.0", identifier: "Apache-2.0" },
   },
   servers: [{ url: "https://verify.placeschema.com" }],
   paths: {
+    "/openapi.json": { get: { summary: "This reference", responses: { "200": { description: "The OpenAPI 3.1 document.", content: { "application/json": { schema: { type: "object" } } } } } } },
     "/v1/version": { get: { summary: "Identity", responses: { "200": { description: "Service identity.", content: { "application/json": { schema: {
       type: "object", required: ["service", "name", "version", "commit"],
       properties: { service: { const: "placeschema" }, name: { type: "string" }, version: { type: "string" }, commit: { type: "string", description: "Deployed commit; empty if unset." } },

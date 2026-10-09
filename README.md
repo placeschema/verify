@@ -10,7 +10,7 @@ request and response schema, is the OpenAPI 3.1 spec at `GET /openapi.json`.
 
 **Limits.** `POST /v1/*` is limited to 60 requests per 60 s per client IP (`CF-Connecting-IP`); over that you get
 `429 {"error":"rate limited"}` with `retry-after: 60`. Through POKT every relay reaches this Worker from the
-supplier's IP, so 60 per minute is the cap for the whole POKT service. `GET` routes are never limited.
+supplier's IP, so 60 per minute is the cap per supplier (the whole POKT service while there is one supplier). `GET` routes are never limited.
 Successful `verify-place` results are cached for 300 s per origin. If the limiter is missing or errors, requests are served normally (fail open).
 `GET /v1/version` returns `service` (the POKT service ID) and `commit` (the `BUILD_COMMIT` var set at deploy; empty if unset) so a deploy can be checked.
 
