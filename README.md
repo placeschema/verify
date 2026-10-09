@@ -15,7 +15,7 @@ Successful `verify-place` results are cached for 300 s per origin. If the limite
 |---|---|
 | `GET /v1/version`, `GET /v1/health` | Identity and liveness: `{service, name, version, commit}`, `{ok: true, status: "ok"}`. |
 | `POST /v1/verify-grant` `{ grant, holder? }` | Is this signed item grant (a kind-30080 Nostr event) authentic? It returns the holder, the minter, the item and its licensed sources. The check is offline. |
-| `POST /v1/stash` `{ holder, grants? }` | Which items does a key publicly report as deposited or redeemed? Signed kind-30083 receipts are read from the relay. Pass grant events to verify their issuance. |
+| `POST /v1/stash` `{ holder, grants? }` | Which items does a key publicly report as deposited or redeemed? Signed kind-30083 receipts are read from the relay. Consign grants can be verified by id; pass other grant events to verify their issuance. |
 | `POST /v1/verify-place` `{ url }` | Is this a live place with a valid `/.well-known/placeschema.json` (and a valid `place.md` when one is served), and what items does it accept? v1 checks known PlaceSchema origins only. |
 
 ## Try it
@@ -37,7 +37,8 @@ or `{ valid: false, reason }`. `test/sample-grant.json` is signed with a throwaw
 `stash` returns `{ holder, items, count, problems }`, with at most 100 items. Each item has a
 grant id, a `deposited` or `redeemed` status, and verification details. `verified: false` means
 the signed receipt is self-reported by the holder; the underlying grant has not been checked.
-To fully verify a matching item, include its signed kind-30080 grant event in `grants`:
+Receipts for consign grants are verified by id through the registrar when its signed grant is available.
+Mint and sidecar grants are not stored there, so include their signed kind-30080 grant events in `grants`:
 
 ```sh
 node -e 'const fs=require("fs"); const grant=JSON.parse(fs.readFileSync("test/sample-grant.json", "utf8")).grant; console.log(JSON.stringify({holder:grant.tags.find(t=>t[0]==="p")[1],grants:[grant]}))' |
@@ -46,6 +47,8 @@ node -e 'const fs=require("fs"); const grant=JSON.parse(fs.readFileSync("test/sa
 
 Matching valid grants add `verified: true`, `minter`, `author`, and `license` to the item.
 The relay URL defaults to `wss://nostr.placeschema.com` and can be set with `STASH_RELAY`.
+The registrar URL defaults to `https://panel.placeschema.com` and can be set with `REGISTRAR_URL`.
+Each stash request looks up at most 20 grant ids among its newest 100 receipts; supplied grants take precedence.
 If the relay cannot be reached, `items` is empty and `problems` explains why.
 
 **What `verify-grant` attests.** `valid: true` means the grant is an authentic issuance by `minter`:

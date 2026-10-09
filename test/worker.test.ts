@@ -21,10 +21,13 @@ function receipt(sk: Uint8Array, grantId: string, status: "deposited" | "redeeme
   return finalizeEvent({ kind: 30083, created_at, tags: [["d", grantId], ["status", status]], content: "" }, sk);
 }
 
-async function withRelay(events: unknown[], run: (requests: unknown[]) => Promise<void>, down = false) {
+async function withRelay(events: unknown[], run: (requests: unknown[]) => Promise<void>, down = false, registry?: (id: string, init?: RequestInit) => Promise<Response>) {
   const real = globalThis.fetch;
   const requests: unknown[] = [];
   globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+    if (registry && String(_url).startsWith("https://registrar.test/grants/")) {
+      return registry(String(_url).slice("https://registrar.test/grants/".length), init);
+    }
     assert.equal(String(_url), "https://relay.test/");
     assert.equal(new Headers(init?.headers).get("upgrade"), "websocket");
     if (down) throw new Error("offline");
@@ -42,7 +45,7 @@ async function withRelay(events: unknown[], run: (requests: unknown[]) => Promis
     };
     return { webSocket: socket } as unknown as Response;
   }) as typeof fetch;
-  env = { STASH_RELAY: "wss://relay.test/" };
+  env = { STASH_RELAY: "wss://relay.test/", REGISTRAR_URL: "https://registrar.test" };
   try { await run(requests); }
   finally { globalThis.fetch = real; env = {}; }
 }
@@ -219,6 +222,82 @@ test("stash verifies supplied grants and rejects grants for a different holder",
     assert.equal(result.body.items[0].author, "A");
     assert.equal(result.body.items[0].license, "CC0-1.0");
     assert.match(result.body.problems.join(" "), /different key/);
+  });
+});
+
+test("stash verifies a consignment receipt by registrar grant id", async () => {
+  const sk = generateSecretKey();
+  const key = getPublicKey(sk);
+  const signed = finalizeEvent(buildGrantEventUnsigned(template as any, key, 1_700_000_003), minterSk);
+  const fetched: string[] = [];
+  await withRelay([receipt(sk, signed.id, "deposited", 100)], async () => {
+    const result = await call("/v1/stash", { holder: key });
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.body.problems, []);
+    assert.deepEqual(result.body.items[0], { grant: signed.id, status: "deposited", verified: true, minter: getPublicKey(minterSk), author: "A", license: "CC0-1.0" });
+    assert.deepEqual(fetched, [signed.id]);
+  }, false, async (id, init) => {
+    fetched.push(id);
+    assert.equal(init?.redirect, "manual");
+    assert.equal(init?.credentials, "omit");
+    assert.equal(new Headers(init?.headers).get("cookie"), null);
+    assert.ok(init?.signal);
+    return new Response(JSON.stringify({ ok: true, grant: signed }));
+  });
+});
+
+test("stash registrar failures leave receipts unverified and report a problem", async () => {
+  const sk = generateSecretKey();
+  const key = getPublicKey(sk);
+  const own = finalizeEvent(buildGrantEventUnsigned(template as any, key, 1_700_000_004), minterSk);
+  const other = finalizeEvent(buildGrantEventUnsigned(template as any, getPublicKey(generateSecretKey()), 1_700_000_005), minterSk);
+  const forged = { ...own, content: own.content.replace("Test Item", "Fake Item") };
+  const cases: [string, string, (id: string, init?: RequestInit) => Promise<Response>][] = [
+    ["404", own.id, async () => new Response(JSON.stringify({ ok: false }), { status: 404 })],
+    ["202 retry", own.id, async () => new Response(JSON.stringify({ ok: false, retry: true }), { status: 202 })],
+    ["wrong holder", other.id, async () => new Response(JSON.stringify({ ok: true, grant: other }))],
+    ["invalid signature", own.id, async () => new Response(JSON.stringify({ ok: true, grant: forged }))],
+    ["timeout", own.id, async () => { throw new DOMException("timed out", "TimeoutError"); }],
+    ["over-cap body", own.id, async () => new Response("x".repeat(16_385))],
+    ["malformed", own.id, async () => new Response("not json")],
+    ["redirect", own.id, async () => new Response("", { status: 302 })],
+  ];
+  for (const [name, id, response] of cases) {
+    await withRelay([receipt(sk, id, "deposited", 100)], async () => {
+      const result = await call("/v1/stash", { holder: key });
+      assert.equal(result.status, 200, name);
+      assert.equal(result.body.items[0].verified, false, name);
+      assert.equal(result.body.problems.length, 1, name);
+      assert.match(result.body.problems[0], /grant/, name);
+      if (name === "wrong holder") assert.match(result.body.problems[0], /different key/);
+    }, false, response);
+  }
+});
+
+test("stash fetches at most 20 newest eligible ids concurrently and supplied grants skip fetch", async () => {
+  const sk = generateSecretKey();
+  const key = getPublicKey(sk);
+  const signed = finalizeEvent(buildGrantEventUnsigned(template as any, key, 1_700_000_006), minterSk);
+  const ids = Array.from({ length: 23 }, (_, n) => n.toString(16).padStart(64, "0"));
+  const events = [receipt(sk, signed.id, "deposited", 200), ...ids.map((id, n) => receipt(sk, id, "deposited", 100 + n)), receipt(sk, "not-hex", "deposited", 99)];
+  const fetched: string[] = [];
+  let active = 0;
+  let peak = 0;
+  await withRelay(events, async () => {
+    const result = await call("/v1/stash", { holder: key, grants: [signed] });
+    assert.equal(result.status, 200);
+    assert.equal(result.body.items.find((item: any) => item.grant === signed.id).verified, true);
+    assert.equal(result.body.items.find((item: any) => item.grant === "not-hex").verified, false);
+    assert.equal(fetched.length, 20);
+    assert.ok(!fetched.includes(signed.id));
+    assert.deepEqual(fetched, ids.slice(-20).reverse());
+    assert.ok(peak > 1);
+  }, false, async (id) => {
+    fetched.push(id);
+    peak = Math.max(peak, ++active);
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    active--;
+    return new Response("", { status: 404 });
   });
 });
 
