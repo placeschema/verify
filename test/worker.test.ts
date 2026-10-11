@@ -19,7 +19,7 @@ const template = {
 const grant = finalizeEvent(buildGrantEventUnsigned(template as any, holder, 1_700_000_000), minterSk);
 
 function receipt(sk: Uint8Array, grantId: string, status: "deposited" | "redeemed", created_at: number) {
-  return finalizeEvent({ kind: 30083, created_at, tags: [["d", grantId], ["status", status]], content: "" }, sk);
+  return finalizeEvent({ kind: 30083, created_at, tags: [["d", grantId], ["e", grantId, "", status], ["t", "placeschema.receipt"]], content: "" }, sk);
 }
 
 async function withRelay(events: unknown[], run: (requests: unknown[]) => Promise<void>, down = false, registry?: (id: string, init?: RequestInit) => Promise<Response>) {
@@ -248,15 +248,47 @@ test("stash verifies receipt signatures, collapses newest status, and returns em
   });
 });
 
-test("stash rejects bad holder and reports relay failure without 5xx", async () => {
+test("stash rejects bad holder and answers relay failure with 502", async () => {
   assert.deepEqual(await call("/v1/stash", { holder: "bad" }), { status: 400, body: { error: "holder must be a 64-hex pubkey string" } });
   await withRelay([], async () => {
     const result = await call("/v1/stash", { holder });
-    assert.equal(result.status, 200);
-    assert.deepEqual(result.body.items, []);
-    assert.equal(result.body.count, 0);
-    assert.match(result.body.problems.join(" "), /relay unavailable.*offline/);
+    assert.equal(result.status, 502);
+    assert.match(result.body.error, /relay unavailable.*offline/);
   }, true);
+});
+
+test("stash returns two carried items with type and label, and count 0 for an empty account", async () => {
+  const sk = generateSecretKey();
+  const key = getPublicKey(sk);
+  const a = finalizeEvent(buildGrantEventUnsigned(template as any, key, 1_700_000_010), minterSk);
+  const b = finalizeEvent(buildGrantEventUnsigned({ ...template, label: "Second Item" } as any, key, 1_700_000_011), minterSk);
+  await withRelay([receipt(sk, a.id, "redeemed", 100), receipt(sk, b.id, "redeemed", 101)], async () => {
+    const result = await call("/v1/stash", { holder: key });
+    assert.equal(result.status, 200);
+    assert.equal(result.body.count, 2);
+    assert.deepEqual(result.body.items.map((i: any) => [i.grant, i.status, i.verified, i.type, i.label]),
+      [[b.id, "redeemed", true, "blade.sword", "Second Item"], [a.id, "redeemed", true, "blade.sword", "Test Item"]]);
+  }, false, async (id) => new Response(JSON.stringify({ grant: id === a.id ? a : b })));
+  await withRelay([], async () => {
+    const result = await call("/v1/stash", { holder: key });
+    assert.deepEqual(result, { status: 200, body: { holder: key, items: [], count: 0, problems: [] } });
+  });
+});
+
+test("stash answers a relay timeout with 504", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const real = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    const socket = { accept() {}, close() {}, addEventListener() {}, send() {} };
+    return { webSocket: socket } as unknown as Response;
+  }) as typeof fetch;
+  env = { STASH_RELAY: "wss://relay.test/" };
+  try {
+    const pending = call("/v1/stash", { holder });
+    await new Promise((r) => setImmediate(r));
+    t.mock.timers.tick(7_000);
+    assert.deepEqual(await pending, { status: 504, body: { error: "relay timed out" } });
+  } finally { globalThis.fetch = real; env = {}; }
 });
 
 test("stash verifies supplied grants and rejects grants for a different holder", async () => {
@@ -284,7 +316,7 @@ test("stash verifies a consignment receipt by registrar grant id", async () => {
     const result = await call("/v1/stash", { holder: key });
     assert.equal(result.status, 200);
     assert.deepEqual(result.body.problems, []);
-    assert.deepEqual(result.body.items[0], { grant: signed.id, status: "deposited", verified: true, minter: getPublicKey(minterSk), author: "A", license: "CC0-1.0" });
+    assert.deepEqual(result.body.items[0], { grant: signed.id, status: "deposited", verified: true, type: "blade.sword", label: "Test Item", minter: getPublicKey(minterSk), author: "A", license: "CC0-1.0" });
     assert.deepEqual(fetched, [signed.id]);
   }, false, async (id, init) => {
     fetched.push(id);

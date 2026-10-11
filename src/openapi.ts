@@ -73,7 +73,7 @@ export const OPENAPI = {
     ),
     "/v1/stash": post(
       "Which items does a key report as deposited or redeemed?",
-      "Live: reads the relay and registrar; limited to 60 POSTs per 60 s per client IP, shared with `player` and `places`. Reads the holder's signed kind-30083 receipts from the relay (newest status per grant, at most 100 items). Receipts are self-reported; a grant is verified when the registrar serves it or it is passed in `grants`. Relay failure returns empty `items` with a problem, not an error.",
+      "Live: reads the relay and registrar; limited to 60 POSTs per 60 s per client IP, shared with `player` and `places`. Reads the holder's signed kind-30083 receipts from the relay (newest status per grant, at most 100 items). Receipts are self-reported; a grant is verified when the registrar serves it or it is passed in `grants`. Verified items carry the grant's `type` and `label`. A relay timeout returns 504, any other relay failure 502.",
       { type: "object", required: ["holder"], properties: { holder: hex64, grants: { type: "array", items: { type: "object" }, description: "Signed kind-30080 grant events to verify." } } },
       { type: "object", required: ["holder", "items", "count", "problems"], properties: {
         holder: hex64, count: { type: "integer" }, problems: { type: "array", items: { type: "string" } },
