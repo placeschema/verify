@@ -26,6 +26,7 @@ Successful results are cached: `place` 300 s per origin, `player` 60 s per name 
 | `POST /v1/player` `{ name }` or `{ pubkey }` | Who is this player? Resolves through the registrar's public NIP-05 map and reverse lookup: `{ pubkey, name, verified, profile: { relays } }`. Live registrar state, cached 60 s. |
 | `POST /v1/places` `{ hub }` | Which worlds does this hub list, and whose items does it trust? `{ hub, worlds: [{ origin, name?, itemsTrusted }] }`, from the registrar's `worlds.md` feeds. `hub` is a public bare https origin. Live registrar state, cached 15 s. |
 | `POST /v1/look` `{ grant, caps, slots?, trusted? }` | Which look should this client draw for this item, on which slot? Verifies the grant offline, then returns `{ look \| null, standIn, reason }`. Pure: the model is never fetched; `look` is the declared candidate and the client's limits to check it against. |
+| `POST /v1/verify-grant`, `POST /v1/verify-place` | Deprecated aliases of `grant` and `place`: same handler, limiter and cache. |
 | `GET /openapi.json` | The OpenAPI 3.1 reference for all of the above. |
 
 **Errors.** Every error body is `{"error": "…"}`.

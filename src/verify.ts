@@ -521,6 +521,7 @@ async function limited(req: Request, limiter: Env["LIMITER"], name: string): Pro
 async function cachedPlace(body: any): Promise<Out> {
   let origin: string;
   try { origin = new URL(body?.url).origin; } catch { return verifyPlaceRequest(body); }
+  // Key stays "verify-place" on purpose: /v1/place and the old alias must share one cache entry.
   return cached(`verify-place?o=${encodeURIComponent(origin)}`, CACHE_SECONDS, () => verifyPlaceRequest(body), (o) => o.status === 200 && o.body?.valid === true);
 }
 
