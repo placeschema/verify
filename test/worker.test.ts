@@ -67,8 +67,13 @@ test("probes", async () => {
 test("openapi.json documents every route", async () => {
   const spec = (await call("/openapi.json")).body;
   assert.equal(spec.openapi, "3.1.0");
-  assert.deepEqual(Object.keys(spec.paths).sort(), ["/openapi.json", "/v1/health", "/v1/look", "/v1/places", "/v1/player", "/v1/stash", "/v1/verify-grant", "/v1/verify-place", "/v1/version"]);
-  for (const p of ["/v1/stash", "/v1/verify-grant", "/v1/verify-place", "/v1/player", "/v1/places", "/v1/look"]) assert.equal((await call(p, undefined)).status, 405, p);
+  assert.deepEqual(Object.keys(spec.paths).sort(), ["/openapi.json", "/v1/grant", "/v1/health", "/v1/look", "/v1/place", "/v1/places", "/v1/player", "/v1/stash", "/v1/verify-grant", "/v1/verify-place", "/v1/version"]);
+  for (const [old, now] of [["/v1/verify-grant", "/v1/grant"], ["/v1/verify-place", "/v1/place"]]) {
+    assert.equal(spec.paths[old].post.deprecated, true);
+    assert.match(spec.paths[old].post.description, new RegExp(`alias of ${now}`));
+    assert.equal(spec.paths[now].post.deprecated, undefined);
+  }
+  for (const p of ["/v1/stash", "/v1/grant", "/v1/place", "/v1/verify-grant", "/v1/verify-place", "/v1/player", "/v1/places", "/v1/look"]) assert.equal((await call(p, undefined)).status, 405, p);
   for (const [p, want] of [["/openapi.json", 200], ["/v1/version", 200], ["/v1/health", 200], ["/nope", 404], ["/v1/stash", 405]] as const) {
     const res = await handle(new Request(`https://x${p}`, { method: "HEAD" }));
     assert.equal(res.status, want, `HEAD ${p}`);
@@ -609,4 +614,18 @@ test("look rejects bad input with 4xx", async () => {
     assert.equal(r.status, 400, JSON.stringify(body));
     assert.ok(r.body.error);
   }
+});
+
+test("/v1/grant and /v1/place answer exactly like the old names", async () => {
+  const bodies: [string, string, unknown][] = [
+    ["/v1/grant", "/v1/verify-grant", { grant, holder }], ["/v1/grant", "/v1/verify-grant", { grant, holder: "0".repeat(64) }],
+    ["/v1/grant", "/v1/verify-grant", {}], ["/v1/place", "/v1/verify-place", { url: "https://evil.example" }],
+  ];
+  for (const [now, old, body] of bodies) {
+    const a = await call(now, body), b = await call(old, body);
+    assert.equal(a.status, b.status, now);
+    assert.deepEqual(a.body, b.body, now);
+  }
+  assert.equal((await call("/v1/grant", { grant, holder })).body.valid, true);
+  assert.equal((await call("/v1/verify-grant", { grant, holder })).body.valid, true);
 });

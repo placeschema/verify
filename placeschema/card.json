@@ -1,12 +1,12 @@
 {
   "schema": "pocket-service-card/v1",
-  "description": "PlaceSchema verification. POST /v1/verify-grant {grant, holder?} checks a signed item grant (Nostr kind-30080 event) offline and returns valid, holder, minter, item hash, type, label and licensed sources. POST /v1/verify-place {url} checks a known PlaceSchema origin's /.well-known/placeschema.json (and place.md) and returns what items it accepts. POST /v1/stash {holder, grants?} lists the items a key reports as deposited or redeemed, verifying grants where it can. JSON in and out; bad input is 4xx, never 5xx. Free.",
+  "description": "PlaceSchema: identity and items that travel between games. POST /v1/grant {grant, holder?} checks a signed item grant (Nostr kind-30080) offline and returns holder, minter, item hash, type, label and licensed sources. POST /v1/place {url} checks a PlaceSchema place and what items it accepts. POST /v1/player {name|pubkey} resolves a player by name or key to a verified identity. POST /v1/places {hub} lists a hub's worlds and which it trusts items from. POST /v1/look {grant, caps, slots?} picks the look a game client should draw for an item (model by sha256, slot and size, or a stand-in). POST /v1/stash {holder} lists what a key reports holding. JSON in and out; bad input is 4xx, never 5xx. Free.",
   "rpc_types": [
     {
       "type": "REST",
       "intent": "expected",
       "backend_hint": "Caddy proxy (placeschema/backend) to the Cloudflare Worker at https://verify.placeschema.com",
-      "notes": "GET /v1/version, GET /v1/health, GET /openapi.json, POST /v1/verify-grant, POST /v1/verify-place and POST /v1/stash."
+      "notes": "GET /v1/version, GET /v1/health, GET /openapi.json; POST /v1/grant, /v1/place, /v1/look (pure) and /v1/player, /v1/places, /v1/stash (live registrar or relay state)."
     }
   ],
   "apis": ["placeschema-verify-api"],
@@ -14,7 +14,7 @@
     { "api": "placeschema-verify-api", "kind": "openapi", "url": "https://verify.placeschema.com/openapi.json" }
   ],
   "access": "public",
-  "results": "deterministic",
+  "results": "variable",
   "serving": {
     "backend": "The placeschema/verify Worker behind a RelayMiner using the rest backend.",
     "implementations": ["placeschema/verify 0.1.0"],
@@ -33,13 +33,13 @@
       },
       {
         "rpc_type": "REST",
-        "request": { "path": "/v1/verify-place", "method": "POST", "body": { "url": "https://hub.placeschema.com" } },
+        "request": { "path": "/v1/place", "method": "POST", "body": { "url": "https://hub.placeschema.com" } },
         "expect": { "json_path": "$.valid", "matches": "^true$" },
         "notes": "Functional probe."
       }
     ],
-    "notes": "POST /v1/* is limited to 60 requests per 60 s per client IP; relays share the supplier's IP, so this is the cap per supplier."
+    "notes": "Pure calls (look, grant, place) are limited to 600 POSTs per 60 s per client IP; live calls (player, cached 60 s; places, cached 15 s; stash) to 60. Relays share the supplier's IP, so these are the caps per supplier."
   },
   "docs": "https://github.com/placeschema/verify#readme",
-  "updated": "2026-10-09"
+  "updated": "2026-10-11"
 }
