@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { buildGrantEventUnsigned } from "@placeschema/protocol";
 import { finalizeEvent, generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import { handle as rawHandle, isKnownOrigin, type Env } from "../src/verify.ts";
@@ -66,8 +67,8 @@ test("probes", async () => {
 test("openapi.json documents every route", async () => {
   const spec = (await call("/openapi.json")).body;
   assert.equal(spec.openapi, "3.1.0");
-  assert.deepEqual(Object.keys(spec.paths).sort(), ["/openapi.json", "/v1/health", "/v1/stash", "/v1/verify-grant", "/v1/verify-place", "/v1/version"]);
-  for (const p of ["/v1/stash", "/v1/verify-grant", "/v1/verify-place"]) assert.equal((await call(p, undefined)).status, 405, p);
+  assert.deepEqual(Object.keys(spec.paths).sort(), ["/openapi.json", "/v1/health", "/v1/look", "/v1/places", "/v1/player", "/v1/stash", "/v1/verify-grant", "/v1/verify-place", "/v1/version"]);
+  for (const p of ["/v1/stash", "/v1/verify-grant", "/v1/verify-place", "/v1/player", "/v1/places", "/v1/look"]) assert.equal((await call(p, undefined)).status, 405, p);
   for (const [p, want] of [["/openapi.json", 200], ["/v1/version", 200], ["/v1/health", 200], ["/nope", 404], ["/v1/stash", 405]] as const) {
     const res = await handle(new Request(`https://x${p}`, { method: "HEAD" }));
     assert.equal(res.status, want, `HEAD ${p}`);
@@ -378,5 +379,153 @@ test("verify-place caches successes so a repeat does not refetch", async () => {
   } finally {
     globalThis.fetch = real;
     delete (globalThis as any).caches;
+  }
+});
+
+/** Run with a mocked registrar: `answer` gets each requested URL. */
+async function withRegistrar(answer: (url: URL) => Promise<Response>, run: (urls: URL[]) => Promise<void>) {
+  const real = globalThis.fetch;
+  const urls: URL[] = [];
+  globalThis.fetch = (async (u: string, init?: RequestInit) => {
+    assert.equal(init?.redirect, "manual");
+    assert.ok(init?.signal);
+    const url = new URL(String(u));
+    urls.push(url);
+    assert.equal(url.origin, "https://registrar.test");
+    return answer(url);
+  }) as typeof fetch;
+  env = { REGISTRAR_URL: "https://registrar.test/" };
+  try { await run(urls); }
+  finally { globalThis.fetch = real; env = {}; }
+}
+const upstreamFailures: [string, () => Promise<Response>, number][] = [
+  ["timeout", async () => { throw new DOMException("timed out", "TimeoutError"); }, 504],
+  ["offline", async () => { throw new TypeError("fetch failed"); }, 502],
+  ["500", async () => new Response("no", { status: 500 }), 502],
+  ["redirect", async () => new Response("", { status: 302 }), 502],
+  ["over-cap body", async () => new Response("x".repeat(300_000)), 502],
+];
+
+test("player resolves a name or a pubkey through NIP-05", async () => {
+  const nip = (names: Record<string, string>) => new Response(JSON.stringify({ names, relays: { [holder]: ["wss://nostr.placeschema.com/"] } }));
+  await withRegistrar(async (url) => url.pathname === "/whoami" ? new Response(JSON.stringify({ ok: true, name: "seth" })) : nip({ seth: holder }), async (urls) => {
+    const byName = await call("/v1/player", { name: "Seth" });
+    assert.equal(byName.status, 200, JSON.stringify(byName.body));
+    assert.deepEqual(byName.body, { pubkey: holder, name: "seth", verified: true, profile: { relays: ["wss://nostr.placeschema.com/"] } });
+    assert.equal(urls[0].pathname, "/.well-known/nostr.json");
+    assert.equal(urls[0].searchParams.get("name"), "seth");
+    const byKey = await call("/v1/player", { pubkey: holder.toUpperCase() });
+    assert.deepEqual(byKey.body, byName.body);
+    assert.match(urls[1].searchParams.get("npub")!, /^npub1/);
+  });
+  await withRegistrar(async (url) => url.pathname === "/whoami" ? new Response(JSON.stringify({ ok: true, name: null })) : nip({}), async () => {
+    assert.deepEqual((await call("/v1/player", { name: "nobody" })).body, { pubkey: null, name: "nobody", verified: false, profile: {} });
+    assert.deepEqual((await call("/v1/player", { pubkey: holder })).body, { pubkey: holder, name: null, verified: false, profile: {} });
+  });
+  // a name whose NIP-05 entry names another key does not verify the key asked about
+  await withRegistrar(async (url) => url.pathname === "/whoami" ? new Response(JSON.stringify({ ok: true, name: "seth" })) : nip({ seth: "a".repeat(64) }), async () => {
+    assert.equal((await call("/v1/player", { pubkey: holder })).body.verified, false);
+  });
+});
+
+test("player rejects bad input with 4xx and upstream failures with 502/504", async () => {
+  for (const body of [{}, { name: "a", pubkey: holder }, { name: "" }, { name: "bad name" }, { name: 7 }, { pubkey: "xyz" }, null]) {
+    const r = await call("/v1/player", body);
+    assert.equal(r.status, 400, JSON.stringify(body));
+    assert.ok(r.body.error);
+  }
+  for (const [name, answer, want] of upstreamFailures) {
+    await withRegistrar(answer, async () => {
+      for (const body of [{ name: "seth" }, { pubkey: holder }]) {
+        const r = await call("/v1/player", body);
+        assert.equal(r.status, want, `${name} ${JSON.stringify(body)}`);
+        assert.ok(r.body.error);
+      }
+    });
+  }
+  await withRegistrar(async () => new Response("not json"), async () => assert.equal((await call("/v1/player", { name: "seth" })).status, 502));
+});
+
+test("places lists a hub's worlds and which it trusts items from", async () => {
+  const head = "---\nversion: 1\n---\n\n# Worlds\n\n";
+  await withRegistrar(async (url) => new Response(url.searchParams.get("games") === "1"
+    ? `${head}- https://forge.placeschema.com — Forge\n- https://mc.example.com — Minecraft\n\n# Not trusted\n\n- ~https://hub.placeschema.com\n- ~https://bad.example.com\n`
+    : `${head}- https://hub.placeschema.com — Hub\n- https://forge.placeschema.com — Forge\n- not a line\n- http://plain.example.com\n`), async (urls) => {
+    const r = await call("/v1/places", { hub: "https://hub.placeschema.com/some/path" });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.deepEqual(r.body, { hub: "https://hub.placeschema.com", worlds: [
+      { origin: "https://hub.placeschema.com", name: "Hub", itemsTrusted: false },
+      { origin: "https://forge.placeschema.com", name: "Forge", itemsTrusted: true },
+      { origin: "https://mc.example.com", name: "Minecraft", itemsTrusted: true },
+    ] });
+    assert.equal(urls.length, 2);
+    for (const u of urls) assert.equal(u.searchParams.get("hub"), "https://hub.placeschema.com");
+  });
+});
+
+test("places rejects bad input with 4xx and upstream failures with 502/504", async () => {
+  for (const body of [{}, { hub: "nope" }, { hub: "http://hub.placeschema.com" }, { hub: "https://u:p@hub.placeschema.com" }, { hub: 3 }]) {
+    assert.equal((await call("/v1/places", body)).status, 400, JSON.stringify(body));
+  }
+  for (const [name, answer, want] of upstreamFailures) {
+    await withRegistrar(answer, async () => assert.equal((await call("/v1/places", { hub: "https://hub.placeschema.com" })).status, want, name));
+  }
+});
+
+test("look picks the slot and declared look for this client, never fetching", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = (async () => { throw new Error("look must not fetch"); }) as typeof fetch;
+  // The vendored 0.1.0 builder drops `look` (newer protocols sign it), so a declared look is added to the content and its id re-derived.
+  const mint = ({ look, ...t }: any) => {
+    const e = buildGrantEventUnsigned({ ...template, ...t } as any, holder, 1_700_000_000);
+    if (look) {
+      const old = e.tags.find((tag: string[]) => tag[0] === "x")![1];
+      e.content = JSON.stringify({ ...JSON.parse(e.content), look });
+      const x = createHash("sha256").update(e.content).digest("hex");
+      e.tags = e.tags.map((tag: string[]) => tag.map((v) => v.replace(old, x)));
+    }
+    return finalizeEvent(e, minterSk);
+  };
+  const caps = { mesh: { maxBytes: 2_097_152, maxVertices: 65_536 } };
+  const sha = "b".repeat(64);
+  try {
+    const asset = mint({ features: ["render-asset:https://cdn.example.com/sword.glb"] });
+    const ok = await call("/v1/look", { grant: asset, caps, slots: ["head", "grip"] });
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    assert.deepEqual(ok.body.look, { url: "https://cdn.example.com/sword.glb", from: "render-asset", slot: "grip", mount: { slot: "grip", size: 1 }, limits: caps.mesh });
+    assert.equal(ok.body.standIn, "blade.sword");
+    assert.match(ok.body.reason, /^declared-not-measured/);
+    const own = { look: { model: { url: "https://blossom.example.com/" + sha, sha256: sha }, by: "minter", license: "CC0-1.0" } };
+    const declared = await call("/v1/look", { grant: mint({ ...own, features: ["render-asset:https://cdn.example.com/sword.glb"] }), caps: { mesh: true } });
+    assert.equal(declared.body.look?.from, "look", JSON.stringify(declared.body));
+    assert.equal(declared.body.look.sha256, sha);
+    const cases: [object, object, string][] = [
+      [{ features: [] }, caps, "no-look"],
+      [{ features: ["render-asset:https://cdn.example.com/a.glb"] }, { mesh: false }, "client-no-mesh"],
+      [{ look: { ...own.look, license: "LicenseRef-closed" } }, caps, "licence"],
+      [{ features: ["render-asset:http://cdn.example.com/a.glb"] }, caps, "foreign-look-untrusted"],
+      [{ features: ["visual:none"] }, caps, "hidden: no-visual-form"],
+      [{ type: "garment.hat", anchors: ["head"], features: ["fits:human"] }, caps, "hidden: unfitted"],
+    ];
+    for (const [t, c, reason] of cases) {
+      const r = await call("/v1/look", { grant: mint(t), caps: c });
+      assert.equal(r.status, 200, reason);
+      assert.equal(r.body.look, null, reason);
+      assert.equal(r.body.reason, reason, JSON.stringify(r.body));
+    }
+    assert.equal((await call("/v1/look", { grant: asset, caps, slots: ["head"] })).body.reason, "no-compatible-slot");
+    const forged = { ...asset, sig: "0".repeat(128) };
+    const bad = await call("/v1/look", { grant: forged, caps });
+    assert.equal(bad.status, 200);
+    assert.match(bad.body.reason, /^invalid-grant/);
+  } finally { globalThis.fetch = real; }
+});
+
+test("look rejects bad input with 4xx", async () => {
+  for (const body of [{}, { caps: { mesh: true } }, { grant, caps: null }, { grant }, { grant, caps: { mesh: { maxBytes: 0, maxVertices: 1 } } },
+    { grant, caps: { mesh: "yes" } }, { grant, caps: { mesh: true }, slots: "grip" }, { grant, caps: { mesh: true }, slots: [1] }]) {
+    const r = await call("/v1/look", body);
+    assert.equal(r.status, 400, JSON.stringify(body));
+    assert.ok(r.body.error);
   }
 });

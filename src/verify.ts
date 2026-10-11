@@ -1,4 +1,5 @@
-import { parsePlaceTemplate, validateCapabilities, verifyGrantEvent } from "@placeschema/protocol";
+import { categoryOf, parsePlaceTemplate, validateCapabilities, verifyGrantEvent } from "@placeschema/protocol";
+import { npubEncode } from "nostr-tools/nip19";
 import { verifyEvent } from "nostr-tools/pure";
 import { OPENAPI } from "./openapi.ts";
 
@@ -247,6 +248,154 @@ export async function stashRequest(body: any, env: Env = {}) {
   return { status: 200, body: { holder, items, count: items.length, problems } };
 }
 
+type Out = { status: number; body: any };
+const registrar = (env: Env) => (env.REGISTRAR_URL ?? REGISTRAR_URL).replace(/\/$/, "");
+
+/** GET from the registrar: the text, or the 502/504 to answer with. A timeout is 504; any other failure, redirect or oversize body is 502. */
+async function upstream(url: string, max = MAX_REGISTRAR_BODY): Promise<{ text: string } | Out> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS), redirect: "manual", credentials: "omit" });
+    if (res.status !== 200) return (await res.body?.cancel().catch(() => {}), { status: 502, body: { error: `registrar returned ${res.status}` } });
+    const text = await readCapped(res.body, max);
+    return text === null ? { status: 502, body: { error: "registrar response too large" } } : { text };
+  } catch (e) {
+    return (e as Error)?.name === "TimeoutError" ? { status: 504, body: { error: "registrar timed out" } } : { status: 502, body: { error: "registrar unreachable" } };
+  }
+}
+async function upstreamJson(url: string): Promise<{ json: any } | Out> {
+  const r = await upstream(url);
+  if (!("text" in r)) return r;
+  try { return { json: JSON.parse(r.text) }; } catch { return { status: 502, body: { error: "registrar returned invalid JSON" } }; }
+}
+
+const NAME = /^[a-z0-9._-]{1,64}$/;
+
+/** Who is this player? A name or pubkey resolved through the registrar's public NIP-05 map and `/whoami`: live registrar state. */
+export async function playerRequest(body: any, env: Env = {}): Promise<Out> {
+  const hasName = body?.name !== undefined, hasKey = body?.pubkey !== undefined;
+  if (hasName === hasKey) return { status: 400, body: { error: "send exactly one of name or pubkey" } };
+  if (hasName && (typeof body.name !== "string" || !NAME.test(body.name.toLowerCase()))) return { status: 400, body: { error: "name must be 1-64 of a-z 0-9 . _ -" } };
+  if (hasKey && (typeof body.pubkey !== "string" || !HEX64.test(body.pubkey.toLowerCase()))) return { status: 400, body: { error: "pubkey must be a 64-hex pubkey string" } };
+  const base = registrar(env);
+  let name: string | null = hasName ? body.name.toLowerCase() : null;
+  const pubkey: string | null = hasKey ? body.pubkey.toLowerCase() : null;
+  if (pubkey) {
+    const who = await upstreamJson(`${base}/whoami?npub=${npubEncode(pubkey)}`);
+    if (!("json" in who)) return who;
+    name = typeof who.json?.name === "string" && NAME.test(who.json.name) ? who.json.name : null;
+    if (!name) return { status: 200, body: { pubkey, name: null, verified: false, profile: {} } };
+  }
+  // NIP-05 forward lookup: the name's key, which must match the pubkey asked about.
+  const nip = await upstreamJson(`${base}/.well-known/nostr.json?name=${encodeURIComponent(name!)}`);
+  if (!("json" in nip)) return nip;
+  const found = nip.json?.names?.[name!];
+  const key = typeof found === "string" && HEX64.test(found) ? found : null;
+  const verified = key !== null && (pubkey === null || key === pubkey);
+  const relays = verified && Array.isArray(nip.json?.relays?.[key!]) ? nip.json.relays[key!].filter((r: unknown) => typeof r === "string").slice(0, 16) : [];
+  return { status: 200, body: { pubkey: pubkey ?? key, name, verified, profile: verified ? { relays } : {} } };
+}
+
+/** The `- https://origin — Name` lines of a worlds.md feed (open-place tools/name-registry/src/world-catalog.ts `renderWorldCatalog`); `- ~origin` is a denial. */
+function parseWorldsMd(text: string) {
+  const out = new Map<string, { name?: string; denied: boolean }>();
+  for (const line of text.split("\n")) {
+    const m = /^- (~?)(https:\/\/\S+?)(?: — (.+?))?\s*$/.exec(line);
+    if (!m) continue;
+    try { if (new URL(m[2]).origin !== m[2]) continue; } catch { continue; }
+    out.set(m[2], { ...(m[3] ? { name: m[3].slice(0, 80) } : {}), denied: m[1] === "~" });
+    if (out.size >= 512) break;
+  }
+  return out;
+}
+
+/** Which worlds does this hub list, and which does it trust items from? Live registrar state. */
+export async function placesRequest(body: any, env: Env = {}): Promise<Out> {
+  let hub: string;
+  try {
+    const u = new URL(body?.hub);
+    if (u.protocol !== "https:" || u.username || u.password) throw new Error();
+    hub = u.origin;
+  } catch {
+    return { status: 400, body: { error: "hub must be an https origin" } };
+  }
+  const url = `${registrar(env)}/.well-known/worlds.md?hub=${encodeURIComponent(hub)}`;
+  const [rings, trust] = await Promise.all([upstream(url, MAX_FETCHED), upstream(`${url}&games=1`, MAX_FETCHED)]);
+  if (!("text" in rings)) return rings;
+  if (!("text" in trust)) return trust;
+  const listed = parseWorldsMd(rings.text), items = parseWorldsMd(trust.text);
+  const worlds = [...new Set([...listed.keys(), ...items.keys()])]
+    .filter((o) => !items.get(o)?.denied || listed.has(o))
+    .map((origin) => {
+      const name = listed.get(origin)?.name ?? items.get(origin)?.name;
+      return { origin, ...(name ? { name } : {}), itemsTrusted: items.get(origin)?.denied === false };
+    });
+  return { status: 200, body: { hub, worlds } };
+}
+
+// Ported from open-place 66a0ba435d9 (PLACE-1136): tools/look-plan/src/caps.ts (ClientCaps, limitsFor) and
+// adapters/sidecar/src/{sidecar.ts parseCaps, look.ts hiddenReason + itemLook, server.ts lookSource}. Selection only:
+// planLook needs the model bytes, and the Worker never downloads or converts one, so it returns the declared candidate
+// with this client's limits. limitsFor's engine bound is the game's own, so here the client's caps are the limits.
+const OPEN_LOOK_LICENSES = new Set(["CC0-1.0", "CC-BY-4.0"]);
+type Caps = { mesh: false | { maxBytes: number; maxVertices: number }; sprite: boolean; cuboid: boolean };
+function parseCaps(raw: any): Caps | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const pos = (n: unknown) => Number.isSafeInteger(n) && (n as number) > 0;
+  let mesh: Caps["mesh"] = false;
+  if (raw.mesh && typeof raw.mesh === "object") {
+    if (!pos(raw.mesh.maxBytes) || !pos(raw.mesh.maxVertices)) return undefined;
+    mesh = { maxBytes: raw.mesh.maxBytes, maxVertices: raw.mesh.maxVertices };
+  } else if (raw.mesh === true) mesh = { maxBytes: Number.MAX_SAFE_INTEGER, maxVertices: Number.MAX_SAFE_INTEGER };
+  else if (raw.mesh !== false) return undefined;
+  return { mesh, sprite: raw.sprite === true, cuboid: raw.cuboid === true };
+}
+
+/** Which look should this client draw for this grant, and on which of the game's slots? */
+export function lookRequest(body: any): Out {
+  if (!body?.grant || typeof body.grant !== "object") return { status: 400, body: { error: "grant (a signed kind-30080 event) is required" } };
+  const caps = parseCaps(body.caps);
+  if (!caps) return { status: 400, body: { error: "caps must be {mesh: false | true | {maxBytes, maxVertices}, sprite?, cuboid?}" } };
+  if (body.slots !== undefined && (!Array.isArray(body.slots) || body.slots.length > 64 || body.slots.some((s: unknown) => typeof s !== "string"))) {
+    return { status: 400, body: { error: "slots must be an array of at most 64 strings" } };
+  }
+  const v = verifyGrantEvent(body.grant);
+  if (!v.ok) return { status: 200, body: { look: null, standIn: null, reason: `invalid-grant: ${v.reason}` } };
+  // The content is signed and hashed into the grant, so `look` (dropped by the vendored 0.1.0 validator) is still authentic.
+  const t: any = { ...JSON.parse(body.grant.content), ...v.template };
+  const anchors: string[] = Array.isArray(t.anchors) ? t.anchors : [];
+  const slot = body.slots ? anchors.find((a) => body.slots.includes(a)) : anchors[0];
+  if (!slot) return { status: 200, body: { look: null, standIn: null, reason: "no-compatible-slot" } };
+  const features: string[] = Array.isArray(t.features) ? t.features.filter((f: unknown) => typeof f === "string") : [];
+  const cat = categoryOf(t.type ?? "");
+  const held = cat === "blade" || cat === "weapon" || anchors.some((a) => a === "grip" || a === "offhand");
+  if (features.includes("visual:none")) return { status: 200, body: { look: null, standIn: null, slot, reason: "hidden: no-visual-form" } };
+  if (!held && features.some((f) => f.startsWith("fits:"))) return { status: 200, body: { look: null, standIn: null, slot, reason: "hidden: unfitted" } };
+  const standIn = /^[a-z0-9._-]{1,64}$/.test(t.type) ? t.type : "item";
+  const generic = (reason: string) => ({ status: 200, body: { look: null, standIn, slot, reason } });
+  if (!caps.mesh) return generic("client-no-mesh");
+  const own = t.look?.model;
+  let candidate: { url: string; sha256?: string; from: "look" | "render-asset" } | undefined;
+  if (own && typeof own.url === "string" && typeof own.sha256 === "string") {
+    if (!OPEN_LOOK_LICENSES.has(t.look.license)) return generic("licence");
+    candidate = { url: own.url, sha256: own.sha256, from: "look" };
+  } else {
+    const asset = features.find((f) => f.startsWith("render-asset:"))?.slice("render-asset:".length);
+    if (asset) candidate = { url: asset, from: "render-asset" };
+  }
+  if (!candidate) return generic("no-look");
+  try { if (new URL(candidate.url).protocol !== "https:") return generic("foreign-look-untrusted"); } catch { return generic("foreign-look-untrusted"); }
+  const d = t.dimensions ?? {};
+  const size = Math.min(2.5, Math.max(0.2, Number(d.l) || 0, Number(d.w) || 0, Number(d.h) || 0));
+  return {
+    status: 200,
+    body: {
+      look: { ...candidate, slot, mount: { slot, size }, limits: caps.mesh },
+      standIn,
+      reason: "declared-not-measured: the model was not fetched; check its sha256, bytes and vertices against limits, else draw standIn",
+    },
+  };
+}
+
 const CACHE_SECONDS = 300;
 let warned = false;
 
@@ -299,7 +448,10 @@ export async function handle(req: Request, env: Env = {}): Promise<Response> {
     if (req.method === "POST" && pathname.startsWith("/v1/") && (await limited(req, env))) {
       return new Response(JSON.stringify({ error: "rate limited" }), { status: 429, headers: { "content-type": "application/json", "retry-after": "60" } });
     }
-    const route = { "/v1/verify-grant": verifyGrantRequest, "/v1/verify-place": cachedPlace, "/v1/stash": (body: any) => stashRequest(body, env) }[pathname];
+    const route = {
+      "/v1/verify-grant": verifyGrantRequest, "/v1/verify-place": cachedPlace, "/v1/stash": (body: any) => stashRequest(body, env),
+      "/v1/player": (body: any) => playerRequest(body, env), "/v1/places": (body: any) => placesRequest(body, env), "/v1/look": lookRequest,
+    }[pathname];
     if (!route) return bad("not found", 404);
     if (req.method !== "POST") return bad("use POST with a JSON body", 405);
     const declared = Number(req.headers.get("content-length"));
