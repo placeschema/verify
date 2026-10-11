@@ -404,6 +404,8 @@ const upstreamFailures: [string, () => Promise<Response>, number][] = [
   ["500", async () => new Response("no", { status: 500 }), 502],
   ["redirect", async () => new Response("", { status: 302 }), 502],
   ["over-cap body", async () => new Response("x".repeat(300_000)), 502],
+  ["registrar 400", async () => new Response("{}", { status: 400 }), 400],
+  ["registrar 429", async () => new Response("{}", { status: 429, headers: { "retry-after": "7" } }), 503],
 ];
 
 test("player resolves a name or a pubkey through NIP-05", async () => {
@@ -428,7 +430,7 @@ test("player resolves a name or a pubkey through NIP-05", async () => {
   });
 });
 
-test("player rejects bad input with 4xx and upstream failures with 502/504", async () => {
+test("player rejects bad input with 4xx and maps upstream failures", async () => {
   for (const body of [{}, { name: "a", pubkey: holder }, { name: "" }, { name: "bad name" }, { name: 7 }, { pubkey: "xyz" }, null]) {
     const r = await call("/v1/player", body);
     assert.equal(r.status, 400, JSON.stringify(body));
@@ -437,21 +439,22 @@ test("player rejects bad input with 4xx and upstream failures with 502/504", asy
   for (const [name, answer, want] of upstreamFailures) {
     await withRegistrar(answer, async () => {
       for (const body of [{ name: "seth" }, { pubkey: holder }]) {
-        const r = await call("/v1/player", body);
-        assert.equal(r.status, want, `${name} ${JSON.stringify(body)}`);
-        assert.ok(r.body.error);
+        const res = await handle(new Request("https://x/v1/player", { method: "POST", body: JSON.stringify(body) }));
+        assert.equal(res.status, want, `${name} ${JSON.stringify(body)}`);
+        assert.ok(((await res.json()) as any).error);
+        if (want === 503) assert.equal(res.headers.get("retry-after"), "7");
       }
     });
   }
   await withRegistrar(async () => new Response("not json"), async () => assert.equal((await call("/v1/player", { name: "seth" })).status, 502));
 });
 
+const feedHead = "---\nversion: 1\n---\n\n# Worlds\n\n";
 test("places lists a hub's worlds and which it trusts items from", async () => {
-  const head = "---\nversion: 1\n---\n\n# Worlds\n\n";
   await withRegistrar(async (url) => new Response(url.searchParams.get("games") === "1"
-    ? `${head}- https://forge.placeschema.com — Forge\n- https://mc.example.com — Minecraft\n\n# Not trusted\n\n- ~https://hub.placeschema.com\n- ~https://bad.example.com\n`
-    : `${head}- https://hub.placeschema.com — Hub\n- https://forge.placeschema.com — Forge\n- not a line\n- http://plain.example.com\n`), async (urls) => {
-    const r = await call("/v1/places", { hub: "https://hub.placeschema.com/some/path" });
+    ? `${feedHead}- https://forge.placeschema.com — Forge\n- https://mc.example.com — Minecraft\n\n# Not trusted\n\n- ~https://hub.placeschema.com\n- ~https://bad.example.com\n`
+    : `${feedHead}- https://hub.placeschema.com — Hub\n- https://forge.placeschema.com — Forge\n- not a line\n- http://plain.example.com\n`), async (urls) => {
+    const r = await call("/v1/places", { hub: "https://Hub.placeschema.com" });
     assert.equal(r.status, 200, JSON.stringify(r.body));
     assert.deepEqual(r.body, { hub: "https://hub.placeschema.com", worlds: [
       { origin: "https://hub.placeschema.com", name: "Hub", itemsTrusted: false },
@@ -463,20 +466,63 @@ test("places lists a hub's worlds and which it trusts items from", async () => {
   });
 });
 
-test("places rejects bad input with 4xx and upstream failures with 502/504", async () => {
-  for (const body of [{}, { hub: "nope" }, { hub: "http://hub.placeschema.com" }, { hub: "https://u:p@hub.placeschema.com" }, { hub: 3 }]) {
-    assert.equal((await call("/v1/places", body)).status, 400, JSON.stringify(body));
-  }
+test("places rejects bad and blocked hubs with 400 and maps upstream failures", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = (async () => { throw new Error("must not fetch"); }) as typeof fetch;
+  try {
+    for (const hub of [undefined, 3, ["https://hub.placeschema.com"], "nope", "http://hub.placeschema.com", "https://u:p@hub.placeschema.com",
+      "https://hub.placeschema.com/path", "https://hub.placeschema.com?x=1", "https://localhost", "https://127.0.0.1", "https://10.0.0.8",
+      "https://[::1]", "https://[::ffff:169.254.169.254]"]) {
+      assert.equal((await call("/v1/places", { hub })).status, 400, String(hub));
+    }
+  } finally { globalThis.fetch = real; }
   for (const [name, answer, want] of upstreamFailures) {
     await withRegistrar(answer, async () => assert.equal((await call("/v1/places", { hub: "https://hub.placeschema.com" })).status, want, name));
   }
 });
 
-test("look picks the slot and declared look for this client, never fetching", async () => {
+test("player and places answers are cached, so a repeat makes no upstream fetch", async () => {
+  const store = new Map<string, Response>();
+  (globalThis as any).caches = { default: { match: async (r: Request) => store.get(r.url)?.clone(), put: async (r: Request, res: Response) => void store.set(r.url, res) } };
+  try {
+    await withRegistrar(async (url) => url.pathname === "/.well-known/nostr.json"
+      ? new Response(JSON.stringify({ names: { seth: holder } }))
+      : new Response(`${feedHead}- https://forge.placeschema.com — Forge\n`), async (urls) => {
+      const a = await call("/v1/player", { name: "seth" });
+      const b = await call("/v1/player", { name: "SETH" });
+      assert.deepEqual(b, a);
+      assert.equal(urls.length, 1);
+      const c = await call("/v1/places", { hub: "https://hub.placeschema.com" });
+      const d = await call("/v1/places", { hub: "https://hub.placeschema.com" });
+      assert.equal(c.status, 200);
+      assert.deepEqual(d, c);
+      assert.equal(urls.length, 3);
+    });
+    // failures are not cached
+    await withRegistrar(async () => new Response("no", { status: 500 }), async (urls) => {
+      await call("/v1/player", { name: "other" });
+      await call("/v1/player", { name: "other" });
+      assert.equal(urls.length, 2);
+    });
+  } finally { delete (globalThis as any).caches; }
+});
+
+test("live routes use LIVE_LIMITER; pure routes use LIMITER", async () => {
+  const used: string[] = [];
+  const limiter = (name: string) => ({ limit: async () => (used.push(name), { success: name !== "LIVE_LIMITER" }) });
+  env = { LIMITER: limiter("LIMITER"), LIVE_LIMITER: limiter("LIVE_LIMITER") };
+  try {
+    for (const p of ["/v1/player", "/v1/places", "/v1/stash"]) assert.equal((await call(p, {})).status, 429, p);
+    for (const p of ["/v1/look", "/v1/verify-grant", "/v1/verify-place"]) assert.notEqual((await call(p, {})).status, 429, p);
+    assert.deepEqual(used, ["LIVE_LIMITER", "LIVE_LIMITER", "LIVE_LIMITER", "LIMITER", "LIMITER", "LIMITER"]);
+  } finally { env = {}; }
+});
+
+test("look picks the slot and a trusted declared look for this client, never fetching", async () => {
   const real = globalThis.fetch;
   globalThis.fetch = (async () => { throw new Error("look must not fetch"); }) as typeof fetch;
   // The vendored 0.1.0 builder drops `look` (newer protocols sign it), so a declared look is added to the content and its id re-derived.
-  const mint = ({ look, ...t }: any) => {
+  const unsigned = ({ look, ...t }: any) => {
     const e = buildGrantEventUnsigned({ ...template, ...t } as any, holder, 1_700_000_000);
     if (look) {
       const old = e.tags.find((tag: string[]) => tag[0] === "x")![1];
@@ -484,26 +530,59 @@ test("look picks the slot and declared look for this client, never fetching", as
       const x = createHash("sha256").update(e.content).digest("hex");
       e.tags = e.tags.map((tag: string[]) => tag.map((v) => v.replace(old, x)));
     }
-    return finalizeEvent(e, minterSk);
+    return e;
   };
+  const mint = (t: object) => finalizeEvent(unsigned(t), minterSk);
   const caps = { mesh: { maxBytes: 2_097_152, maxVertices: 65_536 } };
   const sha = "b".repeat(64);
+  const forge = "https://forge.placeschema.com/looks/sword.glb";
+  const own = { model: { url: "https://minter.example.com/" + sha, sha256: sha }, by: "minter", license: "CC0-1.0" };
   try {
-    const asset = mint({ features: ["render-asset:https://cdn.example.com/sword.glb"] });
+    // a render-asset on a known origin (the default trust)
+    const asset = mint({ features: [`render-asset:${forge}`] });
     const ok = await call("/v1/look", { grant: asset, caps, slots: ["head", "grip"] });
     assert.equal(ok.status, 200, JSON.stringify(ok.body));
-    assert.deepEqual(ok.body.look, { url: "https://cdn.example.com/sword.glb", from: "render-asset", slot: "grip", mount: { slot: "grip", size: 1 }, limits: caps.mesh });
+    assert.deepEqual(ok.body.look, { from: "render-asset", url: forge, slot: "grip", mount: { slot: "grip", size: 1 }, limits: caps.mesh });
     assert.equal(ok.body.standIn, "blade.sword");
     assert.match(ok.body.reason, /^declared-not-measured/);
-    const own = { look: { model: { url: "https://blossom.example.com/" + sha, sha256: sha }, by: "minter", license: "CC0-1.0" } };
-    const declared = await call("/v1/look", { grant: mint({ ...own, features: ["render-asset:https://cdn.example.com/sword.glb"] }), caps: { mesh: true } });
-    assert.equal(declared.body.look?.from, "look", JSON.stringify(declared.body));
-    assert.equal(declared.body.look.sha256, sha);
+    // a caller-trusted origin, and the same url refused when the caller's list does not name it
+    const cdn = mint({ features: ["render-asset:https://cdn.example.com/a.glb"] });
+    assert.equal((await call("/v1/look", { grant: cdn, caps, trusted: ["https://cdn.example.com"] })).body.look?.url, "https://cdn.example.com/a.glb");
+    assert.equal((await call("/v1/look", { grant: cdn, caps })).body.reason, "foreign-look-untrusted");
+    assert.equal((await call("/v1/look", { grant: asset, caps, trusted: ["https://cdn.example.com"] })).body.reason, "foreign-look-untrusted");
+    for (const url of ["http://forge.placeschema.com/a.glb", "https://127.0.0.1/a.glb", "https://[::1]/a.glb", "https://10.0.0.8/a.glb",
+      "https://u:p@forge.placeschema.com/a.glb", "https://forge.placeschema.com./a.glb", "https://localhost/a.glb", "not a url"]) {
+      const r = await call("/v1/look", { grant: mint({ features: [`render-asset:${url}`] }), caps, trusted: ["https://forge.placeschema.com"] });
+      assert.equal(r.body.look, null, url);
+      assert.equal(r.body.reason, "foreign-look-untrusted", url);
+    }
+    // an open declared look resolves by hash; its url is only the untrusted minterUrl
+    const declared = await call("/v1/look", { grant: mint({ look: own, features: [`render-asset:${forge}`] }), caps: { mesh: true } });
+    assert.deepEqual(declared.body.look, {
+      from: "look", sha256: sha, license: "CC0-1.0", by: "minter", minterUrl: own.model.url, fallback: forge,
+      slot: "grip", mount: { slot: "grip", size: 1 }, limits: { maxBytes: Number.MAX_SAFE_INTEGER, maxVertices: Number.MAX_SAFE_INTEGER },
+    });
+    assert.equal(declared.body.look.url, undefined);
+    // a closed declared licence falls back to the render-asset, and says `licence` only without one
+    const closed = { ...own, license: "LicenseRef-closed" };
+    assert.equal((await call("/v1/look", { grant: mint({ look: closed, features: [`render-asset:${forge}`] }), caps })).body.look?.url, forge);
+    assert.equal((await call("/v1/look", { grant: mint({ look: closed }), caps })).body.reason, "licence");
+    // a malformed look is treated as absent
+    for (const bad of [
+      { ...own, by: "anyone" }, { ...own, license: "not a licence" }, { ...own, model: { ...own.model, sha256: sha.toUpperCase() } },
+      { ...own, model: { ...own.model, url: "ftp://x/y" } }, { ...own, model: { ...own.model, url: "https://x/" + "y".repeat(600) } },
+      { ...own, texture: own.model }, { by: "minter", license: "CC0-1.0" },
+    ]) {
+      assert.equal((await call("/v1/look", { grant: mint({ look: bad }), caps })).body.reason, "no-look", JSON.stringify(bad));
+      assert.equal((await call("/v1/look", { grant: mint({ look: bad, features: [`render-asset:${forge}`] }), caps })).body.look?.from, "render-asset");
+    }
+    // a look edited after signing is an invalid grant
+    const signed = mint({ look: own });
+    const edited = { ...signed, content: JSON.stringify({ ...JSON.parse(signed.content), look: { ...own, model: { url: "https://evil.example.com/x", sha256: "c".repeat(64) } } }) };
+    assert.match((await call("/v1/look", { grant: edited, caps })).body.reason, /^invalid-grant/);
     const cases: [object, object, string][] = [
       [{ features: [] }, caps, "no-look"],
-      [{ features: ["render-asset:https://cdn.example.com/a.glb"] }, { mesh: false }, "client-no-mesh"],
-      [{ look: { ...own.look, license: "LicenseRef-closed" } }, caps, "licence"],
-      [{ features: ["render-asset:http://cdn.example.com/a.glb"] }, caps, "foreign-look-untrusted"],
+      [{ features: [`render-asset:${forge}`] }, { mesh: false }, "client-no-mesh"],
       [{ features: ["visual:none"] }, caps, "hidden: no-visual-form"],
       [{ type: "garment.hat", anchors: ["head"], features: ["fits:human"] }, caps, "hidden: unfitted"],
     ];
@@ -514,8 +593,7 @@ test("look picks the slot and declared look for this client, never fetching", as
       assert.equal(r.body.reason, reason, JSON.stringify(r.body));
     }
     assert.equal((await call("/v1/look", { grant: asset, caps, slots: ["head"] })).body.reason, "no-compatible-slot");
-    const forged = { ...asset, sig: "0".repeat(128) };
-    const bad = await call("/v1/look", { grant: forged, caps });
+    const bad = await call("/v1/look", { grant: { ...asset, sig: "0".repeat(128) }, caps });
     assert.equal(bad.status, 200);
     assert.match(bad.body.reason, /^invalid-grant/);
   } finally { globalThis.fetch = real; }
@@ -523,7 +601,10 @@ test("look picks the slot and declared look for this client, never fetching", as
 
 test("look rejects bad input with 4xx", async () => {
   for (const body of [{}, { caps: { mesh: true } }, { grant, caps: null }, { grant }, { grant, caps: { mesh: { maxBytes: 0, maxVertices: 1 } } },
-    { grant, caps: { mesh: "yes" } }, { grant, caps: { mesh: true }, slots: "grip" }, { grant, caps: { mesh: true }, slots: [1] }]) {
+    { grant, caps: { mesh: "yes" } }, { grant, caps: { mesh: true }, slots: "grip" }, { grant, caps: { mesh: true }, slots: [1] },
+    { grant, caps: { mesh: true }, trusted: "https://forge.placeschema.com" }, { grant, caps: { mesh: true }, trusted: ["http://forge.placeschema.com"] },
+    { grant, caps: { mesh: true }, trusted: ["https://127.0.0.1"] }, { grant, caps: { mesh: true }, trusted: ["https://forge.placeschema.com/x"] },
+    { grant, caps: { mesh: true }, trusted: Array.from({ length: 65 }, (_, i) => `https://w${i}.example.com`) }]) {
     const r = await call("/v1/look", body);
     assert.equal(r.status, 400, JSON.stringify(body));
     assert.ok(r.body.error);
