@@ -71,11 +71,13 @@ node -e 'const fs=require("fs"); const grant=JSON.parse(fs.readFileSync("test/sa
   curl -X POST "$BASE/v1/stash" -H 'content-type: application/json' --data-binary @-
 ```
 
-Matching valid grants add `verified: true`, `minter`, `author`, and `license` to the item.
+Matching valid grants add `verified: true`, `type`, `label`, `minter`, `author`, and `license` to the item.
+The status is the receipt's `["e", <grant>, "", "redeemed" | "deposited"]` marker. The account ledger itself is
+NIP-44 encrypted, so these public receipts are the only part of an inventory a key alone can read.
 The relay URL defaults to `wss://nostr.placeschema.com` and can be set with `STASH_RELAY`.
 The registrar URL defaults to `https://panel.placeschema.com` and can be set with `REGISTRAR_URL`.
 Each stash request looks up at most 20 grant ids among its newest 100 receipts; supplied grants take precedence.
-If the relay cannot be reached, `items` is empty and `problems` explains why.
+If the relay times out the answer is `504 {"error":"relay timed out"}`; any other relay failure is `502`.
 
 **What `grant` attests.** `valid: true` means the grant is an authentic issuance by `minter`:
 well-formed, signed by the template's own minter key, and naming `holder` as the key it was minted to.

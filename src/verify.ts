@@ -136,6 +136,12 @@ function receiptTag(ev: Receipt, name: string): string | undefined {
   return ev.tags.find((tag) => tag[0] === name && typeof tag[1] === "string")?.[1];
 }
 
+/** The receipt's marker: `["e", <grant>, <relay hint>, "redeemed" | "deposited"]`, as open-place
+ *  world-kit/src/game-tickets.ts `receiptTemplate` and adapters/sidecar/src/receipt.ts (cfa96a4ba) write it. */
+function receiptMarker(ev: Receipt, grant: string): string | undefined {
+  return ev.tags.find((tag) => tag[0] === "e" && tag[1] === grant)?.[3];
+}
+
 /** A relay response is untrusted; only signed receipts from the requested holder can enter the result. */
 async function readStashReceipts(holder: string, relay: string): Promise<Receipt[]> {
   const url = new URL(relay);
@@ -191,7 +197,7 @@ export async function stashRequest(body: any, env: Env = {}) {
   }
   const holder = body.holder.toLowerCase();
   const problems: string[] = [];
-  const grants = new Map<string, { minter: string; author: string; license: string }>();
+  const grants = new Map<string, { type: string; label: string; minter: string; author: string; license: string }>();
   const suppliedIds = new Set<string>();
   if (body.grants !== undefined && !Array.isArray(body.grants)) return { status: 400, body: { error: "grants must be an array" } };
   const addGrant = (event: any): string | undefined => {
@@ -199,7 +205,7 @@ export async function stashRequest(body: any, env: Env = {}) {
     if (!verdict.ok) return `invalid grant: ${verdict.reason}`;
     if (verdict.holder !== holder) return `grant ${verdict.id} is held by a different key`;
     const source = verdict.template.sources?.[0];
-    grants.set(verdict.id, { minter: verdict.minter, author: source?.author ?? "", license: source?.license ?? "" });
+    grants.set(verdict.id, { type: verdict.template.type, label: verdict.template.label, minter: verdict.minter, author: source?.author ?? "", license: source?.license ?? "" });
   };
   for (const supplied of body.grants ?? []) {
     if (typeof supplied?.id === "string" && HEX64.test(supplied.id)) suppliedIds.add(supplied.id);
@@ -208,11 +214,14 @@ export async function stashRequest(body: any, env: Env = {}) {
   }
   let receipts: Receipt[];
   try { receipts = await readStashReceipts(holder, env.STASH_RELAY ?? "wss://nostr.placeschema.com"); }
-  catch (e) { return { status: 200, body: { holder, items: [], count: 0, problems: [...problems, `relay unavailable: ${message(e)}`] } }; }
+  catch (e) {
+    const timedOut = message(e) === "relay timed out";
+    return { status: timedOut ? 504 : 502, body: { error: timedOut ? "relay timed out" : `relay unavailable: ${message(e)}` } };
+  }
   const newest = new Map<string, Receipt>();
   for (const ev of receipts) {
     const grant = receiptTag(ev, "d");
-    const status = receiptTag(ev, "status");
+    const status = grant && receiptMarker(ev, grant);
     if (!grant || (status !== "redeemed" && status !== "deposited")) continue;
     const previous = newest.get(grant);
     if (!previous || ev.created_at > previous.created_at || (ev.created_at === previous.created_at && ev.id > previous.id)) newest.set(grant, ev);
@@ -243,8 +252,8 @@ export async function stashRequest(body: any, env: Env = {}) {
   const items = selected.map(([grant, ev]) => {
     const checked = grants.get(grant);
     return checked
-      ? { grant, status: receiptTag(ev, "status"), verified: true, ...checked }
-      : { grant, status: receiptTag(ev, "status"), verified: false, note: STASH_NOTE };
+      ? { grant, status: receiptMarker(ev, grant), verified: true, ...checked }
+      : { grant, status: receiptMarker(ev, grant), verified: false, note: STASH_NOTE };
   });
   return { status: 200, body: { holder, items, count: items.length, problems } };
 }
