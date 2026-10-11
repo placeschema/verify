@@ -1,17 +1,20 @@
 # placeschema/verify
 
-Verification for PlaceSchema items and places. Agents already have keys; with this they can
-check who owns a portable item, who made it, and under what licence. It is served directly at
+Verification and lookups for PlaceSchema players, items and places. Agents already have keys; with this they can
+check who owns a portable item, who made it, and under what licence, resolve a player, list a hub's worlds, and pick
+the look a game client should draw. It is served directly at
 `https://verify.placeschema.com` and on Pocket Network **Beta TestNet** as service ID `placeschema`
 (relay endpoint `https://pokt.placeschema.com`). The Agentic Portal listing is pending review.
 
-All calls take and return JSON. Bad input gets a 4xx, never a 5xx. The full reference, with every
+All calls take and return JSON. Bad input gets a 4xx, never a 5xx; the only 5xx are 502/503/504 when the registrar behind `player` or `places` fails. The full reference, with every
 request and response schema, is the OpenAPI 3.1 spec at `GET /openapi.json`.
 
-**Limits.** `POST /v1/*` is limited to 60 requests per 60 s per client IP (`CF-Connecting-IP`); over that you get
-`429 {"error":"rate limited"}` with `retry-after: 60`. Through POKT every relay reaches this Worker from the
-supplier's IP, so 60 per minute is the cap per supplier (the whole POKT service while there is one supplier). `GET` routes are never limited.
-Successful `verify-place` results are cached for 300 s per origin. If the limiter is missing or errors, requests are served normally (fail open).
+**Limits.** `POST /v1/*` is limited per client IP (`CF-Connecting-IP`): 600 requests per 60 s for the pure routes
+(`look`, `verify-grant`, `verify-place`) and 60 per 60 s for the live routes that read the registrar or relay
+(`player`, `places`, `stash`, counted together). Over that you get `429 {"error":"rate limited"}` with `retry-after: 60`.
+Through POKT every relay reaches this Worker from the supplier's IP, so these are the caps per supplier (the whole
+POKT service while there is one supplier). `GET` routes are never limited.
+Successful results are cached: `verify-place` 300 s per origin, `player` 60 s per name or pubkey, `places` 15 s per hub. If the limiter is missing or errors, requests are served normally (fail open).
 `GET /v1/version` returns `service` (the POKT service ID) and `commit` (the `BUILD_COMMIT` var set at deploy; empty if unset) so a deploy can be checked.
 
 | Call | What it answers |
@@ -20,18 +23,24 @@ Successful `verify-place` results are cached for 300 s per origin. If the limite
 | `POST /v1/verify-grant` `{ grant, holder? }` | Is this signed item grant (a kind-30080 Nostr event) authentic? It returns the holder, the minter, the item and its licensed sources. The check is offline. |
 | `POST /v1/stash` `{ holder, grants? }` | Which items does a key publicly report as deposited or redeemed? Signed kind-30083 receipts are read from the relay. Consign grants can be verified by id; pass other grant events to verify their issuance. |
 | `POST /v1/verify-place` `{ url }` | Is this a live place with a valid `/.well-known/placeschema.json` (and a valid `place.md` when one is served), and what items does it accept? v1 checks `https://hub.placeschema.com`, `https://forge.placeschema.com` and test worlds at `https://<slug>.try.placeschema.com` only. |
+| `POST /v1/player` `{ name }` or `{ pubkey }` | Who is this player? Resolves through the registrar's public NIP-05 map and reverse lookup: `{ pubkey, name, verified, profile: { relays } }`. Live registrar state, cached 60 s. |
+| `POST /v1/places` `{ hub }` | Which worlds does this hub list, and whose items does it trust? `{ hub, worlds: [{ origin, name?, itemsTrusted }] }`, from the registrar's `worlds.md` feeds. `hub` is a public bare https origin. Live registrar state, cached 15 s. |
+| `POST /v1/look` `{ grant, caps, slots?, trusted? }` | Which look should this client draw for this item, on which slot? Verifies the grant offline, then returns `{ look \| null, standIn, reason }`. Pure: the model is never fetched; `look` is the declared candidate and the client's limits to check it against. |
 | `GET /openapi.json` | The OpenAPI 3.1 reference for all of the above. |
 
 **Errors.** Every error body is `{"error": "…"}`.
 
 | Status | When |
 |---|---|
-| 400 | A required field is missing or malformed, or the body is not JSON. |
+| 400 | A required field is missing or malformed, or the body is not JSON (for `player` and `places`, also when the registrar rejects the request as bad input). |
 | 404 | Unknown path (`not found`). |
 | 405 | A call route was not sent as `POST` with a JSON body. |
 | 413 | The body is over 64 KB. |
 | 422 | `verify-place` was given an origin v1 does not check (the body adds `known`, the accepted origins), or the request could not be verified. |
 | 429 | Rate limited (see Limits). |
+| 502 | `player` or `places`: the registrar failed, redirected, or answered over its size cap. |
+| 503 | `player` or `places`: the registrar is rate limiting; `retry-after` says when to retry. |
+| 504 | `player` or `places`: the registrar timed out (10 s). |
 
 ## Try it
 
@@ -82,8 +91,33 @@ Any other failure (an error status, a redirect, a `place.md` over 32 KB, a `plac
 curl -X POST "$BASE/v1/verify-place" -d '{"url":"https://hub.placeschema.com"}'
 ```
 
+**Live, cached and pure calls.** `player`, `places` and `stash` are live: they read the registrar
+(`REGISTRAR_URL`) or relay, so the same request can answer differently as names are claimed and hubs approve
+worlds. `player` answers are cached 60 s and `places` answers 15 s. `verify-place` reads the place itself, cached
+300 s. `look` and `verify-grant` are pure and deterministic.
+
+`look` picks the slot (the item's first anchor in `slots`) and then the look, ported from open-place's `look-plan`
+and sidecar selection. The item's own `look.model` under CC0-1.0 or CC-BY-4.0 comes first and is returned as
+`{ from: "look", sha256, license, by, minterUrl, fallback? }`: resolve it by `sha256` on your own Blossom, because
+`minterUrl` is only where the minter said it is and is untrusted. Without one, the item's `render-asset:` url is
+returned as `{ from: "render-asset", url }` only when it is https, by name (no IP literal, userinfo or trailing
+dot), not a private host, and on a trusted origin: one in `trusted` (at most 64 public bare https origins), or by
+default `https://hub.placeschema.com`, `https://forge.placeschema.com` and `https://<slug>.try.placeschema.com`.
+A closed declared licence falls back to the render-asset, and a malformed `look` is ignored. `look` never downloads
+or converts a model, so `reason` is `declared-not-measured` and the caller checks the file's bytes and vertices
+against `limits` before drawing it, else draws `standIn` (the item type). Otherwise `look` is null and `reason`
+says why: `client-no-mesh`, `no-look`, `licence`, `foreign-look-untrusted`, `no-compatible-slot`,
+`hidden: no-visual-form`, `hidden: unfitted` or `invalid-grant: …`.
+
+```sh
+curl -X POST "$BASE/v1/player" -d '{"name":"seth"}'
+curl -X POST "$BASE/v1/places" -d '{"hub":"https://hub.placeschema.com"}'
+node -e 'const fs=require("fs"); const grant=JSON.parse(fs.readFileSync("test/sample-grant.json", "utf8")).grant; console.log(JSON.stringify({grant,caps:{mesh:{maxBytes:2097152,maxVertices:65536}},slots:["grip"],trusted:["https://forge.placeschema.com"]}))' |
+  curl -X POST "$BASE/v1/look" --data-binary @-
+```
+
 The checks are the `@placeschema/protocol` 0.1.0 verifiers. The npm package is coming; until it is
-live, the exact 0.1.0 tarball is vendored in `vendor/`. The verifiers used are `verifyGrantEvent`, `validateCapabilities` and `parsePlaceTemplate`. Nothing is re-implemented here.
+live, the exact 0.1.0 tarball is vendored in `vendor/`. The verifiers used are `verifyGrantEvent`, `validateCapabilities` and `parsePlaceTemplate`; none is re-implemented here. `look`'s slot and look selection, the current protocol's `look` validation and the discovery package's host blocklist are small ports, cited with their source commit in `src/verify.ts`.
 
 ```sh
 npm install && npm test   # node 24

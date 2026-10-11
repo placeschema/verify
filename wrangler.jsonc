@@ -10,6 +10,11 @@
   // v1 is free; POKT's portal bills. Payee for a later paid path (Seth, 2026-10-07): set once, here.
   // Set BUILD_COMMIT to the deployed git sha (`wrangler deploy --var BUILD_COMMIT:$(git rev-parse --short HEAD)`); shown at /v1/version.
   "vars": { "PAYEE": "", "BUILD_COMMIT": "", "STASH_RELAY": "wss://nostr.placeschema.com", "REGISTRAR_URL": "https://panel.placeschema.com" },
-  // 60 POSTs per 60 s per client IP (PLACE-767). Native binding periods are 10 or 60 s only.
-  "ratelimits": [{ "name": "LIMITER", "namespace_id": "767001", "simple": { "limit": 60, "period": 60 } }]
+  // Per client IP; through POKT every relay arrives from one supplier IP. Native binding periods are 10 or 60 s only.
+  // LIMITER: 600 POSTs per 60 s for the pure routes (look, verify-grant, verify-place; PLACE-767, PLACE-1136).
+  // LIVE_LIMITER: 60 POSTs per 60 s for the routes that read the registrar or relay (player, places, stash), to protect them.
+  "ratelimits": [
+    { "name": "LIMITER", "namespace_id": "767001", "simple": { "limit": 600, "period": 60 } },
+    { "name": "LIVE_LIMITER", "namespace_id": "767002", "simple": { "limit": 60, "period": 60 } }
+  ]
 }
