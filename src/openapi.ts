@@ -6,7 +6,7 @@ const errors = {
   "413": { description: "Body over 64 KB.", content: { "application/json": { schema: error } } },
   "422": { description: "The request could not be verified.", content: { "application/json": { schema: error } } },
   "429": {
-    description: "Over the limit from one client IP: 600 POSTs per 60 s for the pure routes (look, verify-grant, verify-place) and 60 per 60 s for the live routes that read the registrar or relay (player, places, stash). Through POKT every relay arrives from its supplier's IP, so this is the cap per supplier (the whole service while there is one supplier).",
+    description: "Over the limit from one client IP: 600 POSTs per 60 s for the pure routes (look, grant, place) and 60 per 60 s for the live routes that read the registrar or relay (player, places, stash). Through POKT every relay arrives from its supplier's IP, so this is the cap per supplier (the whole service while there is one supplier).",
     headers: { "retry-after": { schema: { type: "string", example: "60" } } },
     content: { "application/json": { schema: error } },
   },
@@ -44,7 +44,7 @@ export const OPENAPI = {
     "/v1/health": { get: { summary: "Liveness", responses: { "200": { description: "Up.", content: { "application/json": { schema: {
       type: "object", required: ["ok", "status"], properties: { ok: { const: true }, status: { const: "ok" } },
     } } } } } } },
-    "/v1/verify-grant": post(
+    "/v1/grant": post(
       "Is this signed item grant authentic?",
       "Pure and deterministic. Checks a kind-30080 Nostr grant event offline. `valid: true` means an authentic issuance by `minter` naming `holder`; it does not prove current possession or that the minter is trustworthy.",
       { type: "object", required: ["grant"], properties: { grant: { type: "object", description: "Signed kind-30080 event." }, holder: { ...hex64, description: "Optional; checked against the grant." } } },
@@ -58,7 +58,7 @@ export const OPENAPI = {
         } },
       ] },
     ),
-    "/v1/verify-place": post(
+    "/v1/place": post(
       "Is this a live place, and what does it accept?",
       "Reads the place itself, not the registrar; limited with the pure routes (600 per 60 s). Fetches `/.well-known/placeschema.json` and `/.well-known/place.md` from the url's origin. v1 checks https://hub.placeschema.com, https://forge.placeschema.com and https://<slug>.try.placeschema.com only; any other origin is a 422 whose body lists them in `known`. Only a 404 place.md counts as absent; redirects, errors and oversize files (manifest 256 KB, place.md 32 KB) are problems. Successful results are cached 300 s per origin.",
       { type: "object", required: ["url"], properties: { url: { type: "string", format: "uri", example: "https://hub.placeschema.com" } } },
@@ -129,3 +129,9 @@ export const OPENAPI = {
     ),
   },
 };
+
+// Old names stay live as aliases (the on-chain card's health probe used /v1/verify-place).
+for (const [old, now] of [["/v1/verify-grant", "/v1/grant"], ["/v1/verify-place", "/v1/place"]] as const) {
+  const op = (OPENAPI.paths as any)[now].post;
+  (OPENAPI.paths as any)[old] = { post: { ...op, deprecated: true, summary: `Deprecated: alias of ${now}`, description: `Deprecated: alias of ${now}. ${op.description}` } };
+}

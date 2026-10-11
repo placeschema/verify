@@ -67,8 +67,13 @@ test("probes", async () => {
 test("openapi.json documents every route", async () => {
   const spec = (await call("/openapi.json")).body;
   assert.equal(spec.openapi, "3.1.0");
-  assert.deepEqual(Object.keys(spec.paths).sort(), ["/openapi.json", "/v1/health", "/v1/look", "/v1/places", "/v1/player", "/v1/stash", "/v1/verify-grant", "/v1/verify-place", "/v1/version"]);
-  for (const p of ["/v1/stash", "/v1/verify-grant", "/v1/verify-place", "/v1/player", "/v1/places", "/v1/look"]) assert.equal((await call(p, undefined)).status, 405, p);
+  assert.deepEqual(Object.keys(spec.paths).sort(), ["/openapi.json", "/v1/grant", "/v1/health", "/v1/look", "/v1/place", "/v1/places", "/v1/player", "/v1/stash", "/v1/verify-grant", "/v1/verify-place", "/v1/version"]);
+  for (const [old, now] of [["/v1/verify-grant", "/v1/grant"], ["/v1/verify-place", "/v1/place"]]) {
+    assert.equal(spec.paths[old].post.deprecated, true);
+    assert.match(spec.paths[old].post.description, new RegExp(`alias of ${now}`));
+    assert.equal(spec.paths[now].post.deprecated, undefined);
+  }
+  for (const p of ["/v1/stash", "/v1/grant", "/v1/place", "/v1/verify-grant", "/v1/verify-place", "/v1/player", "/v1/places", "/v1/look"]) assert.equal((await call(p, undefined)).status, 405, p);
   for (const [p, want] of [["/openapi.json", 200], ["/v1/version", 200], ["/v1/health", 200], ["/nope", 404], ["/v1/stash", 405]] as const) {
     const res = await handle(new Request(`https://x${p}`, { method: "HEAD" }));
     assert.equal(res.status, want, `HEAD ${p}`);
@@ -608,5 +613,63 @@ test("look rejects bad input with 4xx", async () => {
     const r = await call("/v1/look", body);
     assert.equal(r.status, 400, JSON.stringify(body));
     assert.ok(r.body.error);
+  }
+});
+
+test("/v1/grant and /v1/place answer exactly like the old names", async () => {
+  const bodies: [string, string, unknown][] = [
+    ["/v1/grant", "/v1/verify-grant", { grant, holder }], ["/v1/grant", "/v1/verify-grant", { grant, holder: "0".repeat(64) }],
+    ["/v1/grant", "/v1/verify-grant", {}], ["/v1/place", "/v1/verify-place", { url: "https://evil.example" }],
+  ];
+  for (const [now, old, body] of bodies) {
+    const a = await call(now, body), b = await call(old, body);
+    assert.equal(a.status, b.status, now);
+    assert.deepEqual(a.body, b.body, now);
+  }
+  assert.equal((await call("/v1/grant", { grant, holder })).body.valid, true);
+  assert.equal((await call("/v1/verify-grant", { grant, holder })).body.valid, true);
+});
+
+const rawCall = async (path: string, body: string, headers: Record<string, string> = {}) => {
+  const res = await handle(new Request(`https://x${path}`, { method: "POST", headers, body }));
+  return { status: res.status, ct: res.headers.get("content-type"), retry: res.headers.get("retry-after"), text: await res.text() };
+};
+const OLD_NEW = [["/v1/verify-grant", "/v1/grant"], ["/v1/verify-place", "/v1/place"]] as const;
+
+test("old and new names match on status, headers and raw body, including a successful place", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = (async (u: string) => (String(u).endsWith("placeschema.json") ? new Response(manifest) : new Response("no", { status: 404 }))) as typeof fetch;
+  try {
+    const cases: [string, string, string][] = [
+      ["/v1/verify-grant", "/v1/grant", JSON.stringify({ grant, holder })],
+      ["/v1/verify-place", "/v1/place", JSON.stringify({ url: "https://forge.placeschema.com" })],
+      ["/v1/verify-place", "/v1/place", JSON.stringify({ url: "https://evil.example" })],
+    ];
+    for (const [old, now, body] of cases) {
+      const a = await rawCall(now, body), b = await rawCall(old, body);
+      assert.deepEqual(a, b, now);
+    }
+    const ok = await rawCall("/v1/place", JSON.stringify({ url: "https://forge.placeschema.com" }));
+    assert.equal(ok.status, 200);
+    assert.equal(JSON.parse(ok.text).valid, true);
+  } finally { globalThis.fetch = real; }
+});
+
+test("old names: limiter 429 on LIMITER only, 413 and invalid JSON", async () => {
+  const used: string[] = [];
+  const limiter = (name: string) => ({ limit: async () => (used.push(name), { success: false }) });
+  env = { LIMITER: limiter("LIMITER"), LIVE_LIMITER: limiter("LIVE_LIMITER") };
+  try {
+    for (const [old, now] of OLD_NEW) {
+      const a = await rawCall(old, "{}"), b = await rawCall(now, "{}");
+      assert.equal(a.status, 429, old);
+      assert.deepEqual(a, b);
+    }
+    assert.deepEqual(used, ["LIMITER", "LIMITER", "LIMITER", "LIMITER"]);
+  } finally { env = {}; }
+  for (const [old] of OLD_NEW) {
+    assert.equal((await rawCall(old, "{not json")).status, 400, old);
+    assert.equal((await rawCall(old, "{}", { "content-length": "999999" })).status, 413, old);
+    assert.equal((await rawCall(old, JSON.stringify({ pad: "é".repeat(40_000) }))).status, 413, old);
   }
 });

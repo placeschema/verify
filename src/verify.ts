@@ -521,11 +521,15 @@ async function limited(req: Request, limiter: Env["LIMITER"], name: string): Pro
 async function cachedPlace(body: any): Promise<Out> {
   let origin: string;
   try { origin = new URL(body?.url).origin; } catch { return verifyPlaceRequest(body); }
+  // Key stays "verify-place" on purpose: /v1/place and the old alias must share one cache entry.
   return cached(`verify-place?o=${encodeURIComponent(origin)}`, CACHE_SECONDS, () => verifyPlaceRequest(body), (o) => o.status === 200 && o.body?.valid === true);
 }
 
 /** Routes that read live upstream state (registrar, relay); they share the stricter LIVE_LIMITER. */
 const LIVE = new Set(["/v1/player", "/v1/places", "/v1/stash"]);
+
+/** Old names kept as aliases (the on-chain card's health probe uses /v1/verify-place). */
+const ALIAS: Record<string, string> = { "/v1/verify-grant": "/v1/grant", "/v1/verify-place": "/v1/place" };
 
 export async function handle(req: Request, env: Env = {}): Promise<Response> {
     // HEAD is GET without the body; link checkers such as the POKT audit probe spec URLs with it.
@@ -533,7 +537,8 @@ export async function handle(req: Request, env: Env = {}): Promise<Response> {
       const res = await handle(new Request(req.url, { method: "GET", headers: req.headers }), env);
       return new Response(null, { status: res.status, headers: res.headers });
     }
-    const { pathname } = new URL(req.url);
+    const raw = new URL(req.url).pathname;
+    const pathname = ALIAS[raw] ?? raw; // old names route through the same handler, limiter group and cache
     if (req.method === "GET" && pathname === "/v1/version") return json({ service: "placeschema", name: "placeschema-verify", version: VERSION, commit: env.BUILD_COMMIT ?? "" });
     if (req.method === "GET" && pathname === "/v1/health") return json({ ok: true, status: "ok" });
     if (req.method === "GET" && pathname === "/openapi.json") return json(OPENAPI);
@@ -542,7 +547,7 @@ export async function handle(req: Request, env: Env = {}): Promise<Response> {
       return new Response(JSON.stringify({ error: "rate limited" }), { status: 429, headers: { "content-type": "application/json", "retry-after": "60" } });
     }
     const route = {
-      "/v1/verify-grant": verifyGrantRequest, "/v1/verify-place": cachedPlace, "/v1/stash": (body: any) => stashRequest(body, env),
+      "/v1/grant": verifyGrantRequest, "/v1/place": cachedPlace, "/v1/stash": (body: any) => stashRequest(body, env),
       "/v1/player": (body: any) => playerRequest(body, env), "/v1/places": (body: any) => placesRequest(body, env), "/v1/look": lookRequest,
     }[pathname];
     if (!route) return bad("not found", 404);
