@@ -119,8 +119,8 @@ node -e 'const fs=require("fs"); const grant=JSON.parse(fs.readFileSync("test/sa
   curl -X POST "$BASE/v1/look" --data-binary @-
 ```
 
-The checks are the `@placeschema/protocol` 0.1.0 verifiers. The npm package is coming; until it is
-live, the exact 0.1.0 tarball is vendored in `vendor/`. The verifiers used are `verifyGrantEvent`, `validateCapabilities` and `parsePlaceTemplate`; none is re-implemented here. `look`'s slot and look selection, the current protocol's `look` validation and the discovery package's host blocklist are small ports, cited with their source commit in `src/verify.ts`.
+The checks are the `@placeschema/protocol` 0.1.0 verifiers, installed from npm and pinned
+to that exact version. The verifiers used are `verifyGrantEvent`, `validateCapabilities` and `parsePlaceTemplate`; none is re-implemented here. `look`'s slot and look selection, the current protocol's `look` validation and the discovery package's host blocklist are small ports, cited with their source commit in `src/verify.ts`.
 
 ```sh
 npm install && npm test   # node 24
