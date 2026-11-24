@@ -15,7 +15,7 @@ request and response schema, is the OpenAPI 3.1 spec at `GET /openapi.json`.
 Through POKT every relay reaches this Worker from the supplier's IP, so these are the caps per supplier (the whole
 POKT service while there is one supplier). `GET` routes are never limited.
 Successful results are cached: `place` 300 s per origin, `player` 60 s per name or pubkey, `places` 15 s per hub. If the limiter is missing or errors, requests are served normally (fail open).
-`GET /v1/version` returns `service` (the POKT service ID) and `commit` (the `BUILD_COMMIT` var set at deploy; empty if unset) so a deploy can be checked.
+`GET /v1/version` returns `service` (the POKT service ID) and `commit` (the deployed short git SHA, or `dev` under local `wrangler dev`) so a deploy can be checked.
 
 | Call | What it answers |
 |---|---|
@@ -126,5 +126,10 @@ to that exact version. The verifiers used are `verifyGrantEvent`, `validateCapab
 npm install && npm test   # node 24
 npm run dev               # wrangler dev
 ```
+
+To deploy, commit all intended changes and run `npm run deploy` from a clean checkout. The deploy script reads
+`git rev-parse --short HEAD`, refuses a dirty checkout or an empty revision, and passes
+`--var BUILD_COMMIT:<sha>` to Wrangler. After an authorized deployment, check `GET /v1/version` for that SHA;
+building or merging a revision alone does not mean it is deployed.
 
 Apache-2.0.
